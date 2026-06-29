@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=65.6.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussian"
+version = "0.1.0"
+description = "Implementations of acquisition functions, and kernels for gaussian processes"
+authors = [
+    { name = "Christopher Pukas", email = "christopher.pukas@gmail.com" }
+]
+readme = "README.md"
+
+requires-python = ">=3.14"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gaussian*"]

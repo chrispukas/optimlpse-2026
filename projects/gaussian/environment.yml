@@ -1,0 +1,11 @@
+name: gaussian
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.14.2
+  - pip
+  - pip:
+    - uv
+    - numpy
+prefix: /Users/apple/miniconda3/envs/gaussian

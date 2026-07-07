@@ -1,6 +1,0 @@
-pyproject.toml
-gaussian.egg-info/PKG-INFO
-gaussian.egg-info/SOURCES.txt
-gaussian.egg-info/dependency_links.txt
-gaussian.egg-info/top_level.txt
-gaussian/surrogate/gp.py

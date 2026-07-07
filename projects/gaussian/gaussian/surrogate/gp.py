@@ -123,7 +123,11 @@ def lmm(
         mat1: NDArray[float64],
         inv: NDArray[float64],
         y: NDArray[float64],
+
         noise_var: float,
+        l: float,
+
+        kernel: Callable,
 
         log_func: Callable = math.log
         ):
@@ -132,11 +136,21 @@ def lmm(
     transpose: NDArray[float64] = (-1/2) * np.matmul(np.matmul(y.T, inv), y)
 
     noise_identity: NDArray[float64] = np.identity(n=n)
-    log: NDArray[float64] = (-1/2) * log_func(np.abs(mat1 + noise_identity * noise_var))
 
+    K_mat1_mat1: NDArray[float64] = cov_matrix(
+        mat1=mat1,
+        mat2=mat1,
+        l=l,
+        noise_var=noise_var,
+
+        kernel=kernel
+    )
+    
+    _, logdet = np.linalg.slogdet(K_mat1_mat1 + noise_identity * noise_var)
+    logdet: NDArray[float64] = (-1/2) * logdet
     norm: NDArray[float64] = -(n/2) * log_func(2 * math.pi)
 
-    return transpose + log + norm
+    return transpose + logdet + norm
 
 def gaussian_surrogate(
         mat1: NDArray[float64],
@@ -180,7 +194,10 @@ def gaussian_surrogate(
         inv=inv,
         y=y,
 
+        l=l,
         noise_var=noise_var,
+
+        kernel=kernel,
     )
 
     return (f_m, f_c, f_lmm)

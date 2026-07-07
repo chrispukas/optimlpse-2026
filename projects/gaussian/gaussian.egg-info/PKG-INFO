@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: gaussian
-Version: 0.1.0
-Summary: Implementations of acquisition functions, and kernels for gaussian processes
-Author-email: Christopher Pukas <christopher.pukas@gmail.com>
-License: MIT
-Requires-Python: >=3.14
-Description-Content-Type: text/markdown

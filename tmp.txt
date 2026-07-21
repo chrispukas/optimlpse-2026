@@ -1,0 +1,246 @@
+import os
+import enum
+
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Any
+
+import torch
+from torch import Tensor
+from torch import quasirandom as t_qrand
+
+import botorch
+from botorch import models as b_models
+from botorch import test_functions as b_tfuncs
+from botorch import acquisition as b_acq
+from botorch import fit as b_fit
+from botorch import optim as b_optim
+from botorch.posteriors import gpytorch as bp_gpytorch
+from botorch.utils import transforms as b_transf
+
+import gpytorch
+from gpytorch import constraints as g_constraints
+from gpytorch import likelihoods as g_lh
+from gpytorch import mlls as g_mlls
+from gpytorch import kernels as g_kern
+
+
+
+
+device: torch.device = torch.device("cpu" if torch.mps.is_available() else "cpu")
+tensor_dtype: torch.dtype = torch.float32
+runs: int = os.environ.get("SMOKE_TEST", 30)
+
+dim: int = 25
+num_samples: int = 5
+
+lb: float = -50
+ub: float = 50
+
+confidence: float = 2.5
+
+batch_size: int = 5
+max_iterations: int = 30
+max_cholesky_size: int = float("inf")
+
+ackley: b_tfuncs.Ackley = b_tfuncs.Ackley(
+    dim=dim,
+    negate=False,
+    ).to(
+        device=device, 
+        dtype=tensor_dtype
+        )
+ackley.bounds[0, :].fill_(lb)
+ackley.bounds[1, :].fill_(ub)
+
+def eval_ackley(x: Tensor):
+    return ackley(b_transf.unnormalize(x, bounds=ackley.bounds))
+
+def create_surrogate(
+        X: Tensor,
+        Y: Tensor,
+        noise_interval: g_constraints.Interval = g_constraints.Interval(1e-6, 1e-4),
+        matern_smoothness: float = 2.5,
+) -> Tuple[b_models.SingleTaskGP, g_lh.GaussianLikelihood]:
+    likelihood: g_lh.GaussianLikelihood = g_lh.GaussianLikelihood(
+        noise_constraint=noise_interval,
+    )
+    kernel: g_kern.ScaleKernel = g_kern.ScaleKernel(
+        base_kernel=g_kern.MaternKernel(
+            nu=matern_smoothness,
+        )
+    )
+    model: b_models.SingleTaskGP = b_models.SingleTaskGP(
+        train_X=X,
+        train_Y=Y,
+        likelihood=likelihood,
+        covar_module=kernel,
+    )
+    mll: g_mlls.ExactMarginalLogLikelihood = g_mlls.ExactMarginalLogLikelihood(
+        likelihood=likelihood,
+        model=model
+    )
+    return (model, mll)
+
+def sample_candidate_positions(
+    dim: int,
+    batch_size: int,
+    scramble: Optional[bool] = True, 
+) -> Tensor:
+    sobol: t_qrand.SobolEngine = t_qrand.SobolEngine(
+        dimension=dim,
+        scramble=scramble,
+        
+    )
+    return sobol.draw(n=batch_size).requires_grad_(True)
+
+def get_ucb(
+        model: b_models.SingleTaskGP,
+        X: Tensor,
+    ) -> Tensor:
+    posterior: bp_gpytorch.GPyTorchPosterior = model.posterior(X=X)
+    return posterior.mean + confidence * torch.sqrt(posterior.variance)
+
+def get_lcb(
+        model: b_models.SingleTaskGP, 
+        X: Tensor
+        ) -> Tensor:
+    posterior: bp_gpytorch.GPyTorchPosterior = model.posterior(X=X)
+    return posterior.mean - confidence * torch.sqrt(posterior.variance)
+
+def pessimistic_safe_subset(
+        model: b_models.SingleTaskGP,
+        X: Tensor,
+    ) -> Tensor:
+    ucb_tensor: Tensor = get_lcb(
+        model=model,
+        X=X,
+    )
+    return X[torch.argmin(ucb_tensor, dim=0)]
+
+def optimistic_safe_subset(
+        model: b_models.SingleTaskGP,
+        Z: Tensor,
+        X: Tensor,
+    ) -> Tensor:
+
+    X_ucb_tensor: Tensor = get_ucb(
+        model=model,
+        X=X,
+    )
+
+    posterior_X: bp_gpytorch.GPyTorchPosterior = model.posterior(X=X)
+    mean_flat: Tensor = posterior_X.mean.flatten()
+
+    gradients: Tensor = torch.abs(
+        torch.autograd.grad(
+            outputs=mean_flat,
+            inputs=X,
+            grad_outputs=torch.ones_like(mean_flat),
+        )[0]
+    )
+
+    eucl_distance_XZ: Tensor = torch.cdist(
+        x1=X,
+        x2=Z,
+    )
+
+    L_i: Tensor = torch.amax(gradients)
+    safety: Tensor = X_ucb_tensor - L_i * eucl_distance_XZ
+    mask: Tensor = (safety >= 0).any(dim=0)
+
+    Z_lcb_tensor: Tensor = get_lcb(
+        model=model,
+        X=Z,
+    )
+
+    z_masked: Tensor = torch.where(mask.unsqueeze(1), Z_lcb_tensor, float("inf"))
+    print(torch.argmin(z_masked, dim=0))
+    return Z[torch.argmin(z_masked, dim=0)]
+
+def selection(
+        model: b_models.SingleTaskGP,
+
+        X_select: Tensor,
+        Z_select: Tensor,
+
+        X: Tensor,
+    ) -> Tensor:
+
+    if get_lcb(model=model, X=X_select).item() < get_lcb(model=model, X=Z_select).item():
+        return X_select
+    
+    eucl_distance: Tensor = torch.cdist(
+        x1=X,
+        x2=Z_select
+    )
+    return X[torch.argmin(input=eucl_distance, dim=0)]
+    
+
+x_safe: Tensor = torch.rand(
+    size=[num_samples, dim],
+    requires_grad=True
+).to(device=device, dtype=tensor_dtype)
+y_safe: Tensor = torch.tensor(
+    [eval_ackley(x_safe[i, :]) for i in range(num_samples)],
+).to(device=device, dtype=tensor_dtype).unsqueeze(-1)
+
+z_safe: Tensor = torch.zeros_like(
+    x_safe,
+    requires_grad=True
+    ).to(device=device, dtype=tensor_dtype)
+
+state: BOState = BOState(
+    max_iterations=max_iterations,
+)
+
+while not state.is_exceeded():
+    state.increment()
+    model, mll = create_surrogate(
+        X=x_safe.detach(),
+        Y=y_safe.detach(),
+    )
+    
+    with gpytorch.settings.max_cholesky_size(max_cholesky_size):
+        b_fit.fit_gpytorch_mll(mll=mll)
+
+        z_candidates: Tensor = sample_candidate_positions(
+            dim=dim,
+            batch_size=batch_size,
+            scramble=True
+        )
+
+        pessimistic: Tensor = pessimistic_safe_subset(
+            model=model,
+            X=x_safe,
+        )
+        optimistic: Tensor = optimistic_safe_subset(
+            model=model,
+            X=x_safe,
+            Z=z_candidates,
+        )
+        next_candidates: Tensor = selection(
+            model=model,
+
+            X_select=pessimistic,
+            Z_select=optimistic,
+            
+            X=x_safe,
+        )
+
+        y_next: Tensor = torch.tensor(
+            [eval_ackley(x) for x in next_candidates], 
+            dtype=tensor_dtype, 
+            device=device
+        ).unsqueeze(-1)
+
+        x_safe: Tensor = torch.cat(
+            (x_safe, next_candidates),
+            dim=0,
+        )
+        y_safe: Tensor = torch.cat(
+            (y_safe, y_next), 
+            dim=0,
+        )
+
+        print(f"minimum y value: {torch.amax(y_next)}")
+

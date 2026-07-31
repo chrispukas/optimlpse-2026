@@ -1,9 +1,9 @@
 from typing import Tuple, List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 
-from safebo_simpl.util import safe_BO_generics as su_safe
-from safebo_simpl.util import bayesian_parameters as su_prms
-from safebo_simpl.util import objective_functions as su_objfuncs
+from safebo_simpl.util import generics as su_safe
+from safebo_simpl.util import params as su_prms
+from safebo_simpl.util import objfuncs as su_objfuncs
 
 import torch
 from torch import Tensor
@@ -52,6 +52,9 @@ class BOParams_GPsTR(
         # Setting initial config for dynamic variables across a run
         self.dynamics.delta_t = (self.convergence.delta_max + self.convergence.delta_min) / 2.
         self.dynamics.max_iterations = 30    
+
+        self.data.negate = False
+
 
 
 class GPsTR(su_safe.SafeBOAlgorithm):
@@ -125,7 +128,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             D: Tensor,
             delta_t: float,
         ) -> Tensor:
-        lcb_XD: Tensor = self.get_lcb(X=X+D, beta=self.state.convergence.confidence_level)
+        lcb_XD: Tensor = self.surrogate.get_lcb(X=X+D, beta=self.state.convergence.confidence_level)
         eucl_mask: Tensor = (torch.linalg.norm(D, dim=1) <= delta_t)
         abs_XD_proposed: Tensor = torch.abs(X+D)
 
@@ -133,11 +136,15 @@ class GPsTR(su_safe.SafeBOAlgorithm):
         constraint_mask: Tensor = (abs_XD_proposed <= 5).all(dim=1)
         valid_mask: Tensor = constraint_mask & eucl_mask
         if not valid_mask.any():
-            return torch.zeros_like(D)
+            return torch.zeros_like(D[0, :])
 
         masked: Tensor = torch.where(valid_mask.unsqueeze(1), lcb_XD, float("inf"))
+        d_min: Tensor = torch.argmin(input=masked, dim=0)
 
-        return D[torch.argmin(input=masked, dim=0).squeeze()]
+        if d_min.shape[0] > 1:
+            d_min: Tensor = d_min[0, :]
+
+        return D[d_min.squeeze()]
 
     def get_accuracy_ratio(
             self,

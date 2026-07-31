@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from safebo_simpl.util import bayesian_parameters as su_prms
+from safebo_simpl.util import params as su_prms
 
 def rand_initial(
         state: su_prms.BOParams

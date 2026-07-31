@@ -43,7 +43,7 @@ class BOParams[
 
     sampling: T_BOParams_Sampling
     convergence: T_BOParams_Convergence
-    constarints: T_BOParams_Constraints
+    constraints: T_BOParams_Constraints
     data: T_BOParams_Data
     dynamics: T_BOParams_Dynamics
 

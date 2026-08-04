@@ -130,10 +130,9 @@ class GPsTR(su_safe.SafeBOAlgorithm):
         ) -> Tensor:
         lcb_XD: Tensor = self.surrogate.get_lcb(X=X+D, beta=self.state.convergence.confidence_level)
         eucl_mask: Tensor = (torch.linalg.norm(D, dim=1) <= delta_t)
-        abs_XD_proposed: Tensor = torch.abs(X+D)
 
         # Ackley constraint bounds
-        constraint_mask: Tensor = (abs_XD_proposed <= 5).all(dim=1)
+        constraint_mask: Tensor = self.state.constraints.get_constraint(X=X)
         valid_mask: Tensor = constraint_mask & eucl_mask
         if not valid_mask.any():
             return torch.zeros_like(D[0, :])
@@ -156,8 +155,8 @@ class GPsTR(su_safe.SafeBOAlgorithm):
 
         new: Tensor = X_prev + D_next
 
-        posterior_XD: bp_gpytorch.GPyTorchPosterior = self.posterior(X=new)
-        posterior_X: bp_gpytorch.GPyTorchPosterior  = self.posterior(X=X_prev)
+        posterior_XD: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=new)
+        posterior_X: bp_gpytorch.GPyTorchPosterior  = self.surrogate.posterior(X=X_prev)
         
         a_num: Tensor = (objective_function.forward(new) - objective_function.forward(X_prev))
         a_denom: Tensor = posterior_XD.mean - posterior_X.mean

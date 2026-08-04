@@ -1,6 +1,14 @@
 from typing import Any, Tuple, List, TypeVar, Generic, Callable, overload
 from dataclasses import dataclass, field
 
+from safebo_simpl.util import typing as su_typing
+from safebo_simpl.util.constraints import NonSurrogateConstraint, Constraint
+
+import torch
+from torch import Tensor
+
+
+
 @dataclass
 class BOParams_Sampling():
     initial_candidates: int = 64
@@ -13,8 +21,26 @@ class BOParams_Convergence():
     max_cholesky_size: float = float("inf")
 
 @dataclass
-class BOParams_Constraints():
-    ...
+class BOParams_Constraints[
+    T_Constraint: Constraint
+    ]:
+    constraint: su_typing.Conditional[T_Constraint] = None
+
+    def get_constraint(
+            self,
+            X: Tensor
+        ) -> Tensor:
+        if self.constraint is None:
+            return X
+        return self.constraint.forward(X=X)
+    def fit_constraint(
+            self,
+            X: Tensor
+        ) -> None:
+        if self.constraint is None:
+            return
+        self.constraint.fit(X=X)
+
 
 @dataclass
 class BOParams_Data():
@@ -58,15 +84,8 @@ class BOParams[
             dynamics: Instantiable[T_BOParams_Dynamics] = BOParams_Dynamics,
             ) -> None:
         
-        self.sampling: T_BOParams_Sampling = self._factory(sampling)
-        self.convergence: T_BOParams_Convergence = self._factory(convergence)
-        self.constraints: T_BOParams_Constraints = self._factory(constraints)
-        self.data: T_BOParams_Data = self._factory(data)
-        self.dynamics: T_BOParams_Dynamics = self._factory(dynamics)
-
-    def _factory[T](
-            self, 
-            val: T | type[T],
-            **kwargs: Any
-            ) -> T:
-        return val(**kwargs) if isinstance(val, type) else val # type: ignore
+        self.sampling: T_BOParams_Sampling = su_typing._factory(sampling)
+        self.convergence: T_BOParams_Convergence = su_typing._factory(convergence)
+        self.constraints: T_BOParams_Constraints = su_typing._factory(constraints)
+        self.data: T_BOParams_Data = su_typing._factory(data)
+        self.dynamics: T_BOParams_Dynamics = su_typing._factory(dynamics)

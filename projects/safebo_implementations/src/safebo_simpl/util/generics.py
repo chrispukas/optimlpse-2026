@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Tuple, Any, Callable
+from typing import Tuple, Any, Callable, Generic
 from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
@@ -20,15 +20,26 @@ from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
 from botorch import fit as b_fit
 
-class Surrogate():
+class Surrogate[
+    T_BOParams: su_prms.BOParams
+    ]:
     def __init__(
             self,
             dtype: torch.dtype,
             device: torch.device,
+            X: Tensor,
+            Y: Tensor,
+            state: T_BOParams
             ) -> None:
         super().__init__()
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
+        self.state: T_BOParams = state
+
+        self.refresh_surrogate(
+            X=X, 
+            Y=Y,
+            )
 
     def posterior(
                 self,
@@ -48,9 +59,11 @@ class Surrogate():
                 Y: Tensor,
             ) -> Surrogate:
         (self.surrogate_model, self.surrogate_likelihood) = self._create_surrogate(
-            X=X,
-            Y=Y,
+            X=X.detach(),
+            Y=Y.detach(),
         )
+        with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
+            b_fit.fit_gpytorch_mll(mll=self.surrogate_likelihood)
         self.posterior_state = PosteriorState()
         return self
 
@@ -116,20 +129,20 @@ class Surrogate():
             (mean, std) = properties
             return mean + beta * std
             
-        def get_lcb(
-                self,
-                X: Tensor,
-                beta: float,
-            ) -> Tensor:
-            self.posterior_state.forward(
-                x=X,
-                model=self.surrogate_model
-                )
-            properties: Tuple[Tensor, Tensor] | None = self.posterior_state.properties
-            if properties is None:
-                raise ValueError("Unable to extract properties from the posterior to calculate the lcb!")
-            (mean, std) = properties
-            return mean - beta * std
+    def get_lcb(
+            self,
+            X: Tensor,
+            beta: float,
+        ) -> Tensor:
+        self.posterior_state.forward(
+            x=X,
+            model=self.surrogate_model
+            )
+        properties: Tuple[Tensor, Tensor] | None = self.posterior_state.properties
+        if properties is None:
+            raise ValueError("Unable to extract properties from the posterior to calculate the lcb!")
+        (mean, std) = properties
+        return mean - beta * std
 
 class SafeBOAlgorithm[
     T_BOParams: su_prms.BOParams
@@ -159,6 +172,9 @@ class SafeBOAlgorithm[
         self.surrogate: Surrogate = Surrogate(
             dtype=dtype,
             device=device,
+            X=X_safe,
+            Y=Y_safe,
+            state=state,
         )
 
     def _train(
@@ -172,7 +188,6 @@ class SafeBOAlgorithm[
             self.surrogate.refresh_surrogate(X=self.X_safe.detach(), Y=self.Y_safe.detach())
 
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
-                b_fit.fit_gpytorch_mll(mll=self.surrogate.surrogate_likelihood)
 
                 X_candidates: Tensor = single_pass(
                     self.X_safe,

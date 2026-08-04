@@ -5,7 +5,7 @@ import torch
 from torch import Tensor
 
 from botorch import test_functions as b_tfuncs
-from safebo_simpl.util import bayesian_parameters as su_prms
+from safebo_simpl.util import params as su_prms
 
 type InitializerCallable[A, T] = Callable[[A], T] | None
 

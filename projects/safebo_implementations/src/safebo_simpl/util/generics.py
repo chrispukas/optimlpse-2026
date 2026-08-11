@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
 from safebo_simpl.util import objfuncs as su_objfuncs
+from safebo_simpl.util.typing import Conditional
 
 import torch
 from torch import Tensor
@@ -19,6 +20,10 @@ import botorch
 from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
 from botorch import fit as b_fit
+
+import numpy as np
+import numpy.typing as npt
+from scipy.optimize import differential_evolution
 
 class Surrogate[
     T_BOParams: su_prms.BOParams
@@ -179,20 +184,31 @@ class SafeBOAlgorithm[
 
     def _train(
             self,
-            single_pass: Callable[[Tensor, su_objfuncs.ObjectiveFunction], Tensor],
+            single_pass: Callable[[Tensor, su_objfuncs.ObjectiveFunction], Conditional[Tensor]],
             metrics: bool = False,
             ) -> None:
 
         while not self.state.dynamics.is_exceeded():
             self.state.dynamics.increment()
-            self.surrogate.refresh_surrogate(X=self.X_safe.detach(), Y=self.Y_safe.detach())
+
+            X: Tensor = self.X_safe.detach()
+            Y: Tensor = self.Y_safe.detach()
+
+            self.surrogate.refresh_surrogate(X=X, Y=Y)
+            if self.state.constraints.is_available():
+                self.state.constraints.refresh_constraints(X=X)
 
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
-                X_candidates: Tensor = single_pass(
+                X_candidates_outs: Conditional[Tensor] = single_pass(
                     self.X_safe,
                     self.objective_function
-                ).unsqueeze(0)
+                )
+
+                if not isinstance(X_candidates_outs, Tensor):
+                    continue
+
+                X_candidates: Tensor = X_candidates_outs.unsqueeze(0)
                 Y_candidates: Tensor = self.objective_function.forward(
                     X=X_candidates,
                 ).unsqueeze(-1)
@@ -207,9 +223,10 @@ class SafeBOAlgorithm[
             )
 
             if metrics:
-                print(f"Minimum y-value: {torch.amin(self.Y_safe)}")
-    
-    def sample_discrete(
+                print(f"Minimum y-value: {torch.amin(self.Y_safe)}, Maximum y-value: {torch.amax(self.Y_safe)}, Latest: {Y_candidates}")
+
+    # Discrete 'Monte Carlo' sampling
+    def sobol_sampler(
             self,
             n: int,
             dim: int,
@@ -223,6 +240,54 @@ class SafeBOAlgorithm[
         )
         draw: Tensor = sobol.draw(n=n).to(device=self.device, dtype=self.dtype).requires_grad_(requires_grad)
         return draw * 2 - 1 if center else draw
+
+    def de_sampler(
+            self,
+            n: int,
+            acq_func: Callable[[float | npt.NDArray[np.float32]], float | npt.NDArray[np.float32]],
+            bounds: npt.NDArray[np.float32],
+            maxiter: int = 50,
+            strategy: str = "best1bin"
+            ):
+        def wrapper(
+                x: npt.NDArray[np.float32]
+                ) -> npt.NDArray[np.float32]:
+            X: Tensor = torch.tensor(
+                x,
+                dtype=self.dtype,
+                device=self.device,
+            ).unsqueeze(0)
+            with torch.no_grad():
+                loss: npt.NDArray[np.float32] = acq_func(X)
+            return loss
+        result: npt.NDArray[np.float32] = differential_evolution(
+            func=wrapper,
+            bounds=self.sanitize_bounds(bounds),
+            popsize=n,
+            maxiter=maxiter,
+            strategy=strategy,
+        ).x
+        return torch.tensor(
+            data=result,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+    @staticmethod
+    def sanitize_bounds(
+        bounds: npt.NDArray[np.float32],
+        limit: float = 1e5
+        ) -> npt.NDArray[np.float32]:
+        return np.nan_to_num(
+            bounds, 
+            nan=0.0, 
+            posinf=limit, 
+            neginf=-limit
+        )
+
+        
+
+        
 
 @dataclass
 class PosteriorState():

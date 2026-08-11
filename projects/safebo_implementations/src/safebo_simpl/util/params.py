@@ -1,3 +1,5 @@
+import copy
+
 from typing import Any, Tuple, List, TypeVar, Generic, Callable, overload
 from dataclasses import dataclass, field
 
@@ -6,8 +8,6 @@ from safebo_simpl.util.constraints import NonSurrogateConstraint, Constraint
 
 import torch
 from torch import Tensor
-
-
 
 @dataclass
 class BOParams_Sampling():
@@ -24,22 +24,35 @@ class BOParams_Convergence():
 class BOParams_Constraints[
     T_Constraint: Constraint
     ]:
-    constraint: su_typing.Conditional[T_Constraint] = None
+    constraints: su_typing.Conditional[List[T_Constraint]] = None
 
-    def get_constraint(
+    def is_available(
+                self,
+            ) -> bool:
+        return bool(self.constraints)
+
+    def get_constraints(
             self,
             X: Tensor
         ) -> Tensor:
-        if self.constraint is None:
-            return X
-        return self.constraint.forward(X=X)
-    def fit_constraint(
+        DEFAULT: Tensor = torch.ones(X.shape[:-1], dtype=torch.bool, device=X.device)
+        if not self.constraints:
+            return copy.copy(DEFAULT)
+        mask: Tensor = copy.copy(DEFAULT)
+
+        for constraint in self.constraints:
+            mask: Tensor = mask & constraint.forward(X=X)
+        return mask
+    
+    def refresh_constraints(
             self,
             X: Tensor
         ) -> None:
-        if self.constraint is None:
+        if not self.constraints:
             return
-        self.constraint.fit(X=X)
+
+        for constraint in self.constraints:
+            constraint.fit(X=X)
 
 
 @dataclass

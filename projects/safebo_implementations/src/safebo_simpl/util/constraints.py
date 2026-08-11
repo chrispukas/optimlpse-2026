@@ -127,9 +127,9 @@ class SurrogateConstraint[
             X: Tensor,
             boolmask: bool = True,
             ) -> Tensor:
-        acq: Tensor = self.surrogate.get_lcb(X=X, beta=self.state.convergence.confidence_level)
-        lb_mask: Tensor = (acq >= self.bounds[0, :]).any(dim=1)
-        ub_mask: Tensor = (acq <= self.bounds[1, :]).any(dim=1)
+        acq: Tensor = self.surrogate.get_ucb(X=X, beta=self.state.convergence.confidence_level)
+        lb_mask: Tensor = (acq >= self.bounds[0, :]).all(dim=1)
+        ub_mask: Tensor = (acq <= self.bounds[1, :]).all(dim=1)
 
         mask: Tensor = lb_mask & ub_mask
 
@@ -140,7 +140,7 @@ class SurrogateConstraint[
             X: Tensor,
             **kwargs: Any,
             ) -> None:
-        Y_new: Tensor = self.constraint_function.forward(X=X)
+        Y_new: Tensor = self.constraint_function.forward(X=X).unsqueeze(-1)
 
         self.X = torch.cat([self.X, X])
         self.Y = torch.cat([self.Y, Y_new])

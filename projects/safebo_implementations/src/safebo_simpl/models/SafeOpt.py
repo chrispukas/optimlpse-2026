@@ -70,12 +70,12 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
                 objective_function: su_objfuncs.ObjectiveFunction,
                 **kwargs: Any
             ) -> Tensor:
-        X_candidates: Tensor = self.sample_discrete(
+        X_candidates: Tensor = self.sobol_sampler(
             n=self.state.sampling.batch_size,
             dim=self.state.data.dimensions,
             scramble=True
         )
-        Z_candidates: Tensor = self.sample_discrete(
+        Z_candidates: Tensor = self.sobol_sampler(
             n=self.state.sampling.batch_size,
             dim=self.state.sampling.dimensions,
             scramble=True

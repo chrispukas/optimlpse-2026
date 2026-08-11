@@ -2,37 +2,20 @@ from typing import Tuple, List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
-from safebo_simpl.util import params as su_prms
 from safebo_simpl.util import objfuncs as su_objfuncs
+
+from safebo_simpl.util.params import BOParams
+from safebo_simpl.util.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
 
 import torch
 from torch import Tensor
 
+import numpy as np
+import numpy.typing as npt
+
 import botorch
 from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
-
-@dataclass
-class BOParams_GPsTR(
-    su_prms.BOParams[
-        su_prms.BOParams_Sampling,
-        su_prms.BOParams_Convergence,
-        su_prms.BOParams_Constraints,
-        su_prms.BOParams_Data,
-        su_prms.BOParams_Dynamics
-        ]
-    ):
-    def __init__(
-            self,
-            ) -> None:
-        super().__init__()
-
-    def __post_init__(
-            self
-            ) -> None:
-        # Setting initial config for dynamic variables across a run
-        self.dynamics.max_iterations = 30    
-        self.data.negate = False
         
 class GoOSE(su_safe.SafeBOAlgorithm):
     def __init__(
@@ -43,7 +26,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             dtype: torch.dtype,
             device: torch.device,
 
-            state: BOParams_GPsTR,
+            state: BOParams,
             objective_function: su_objfuncs.ObjectiveFunction,
             ) -> None:
         super().__init__(
@@ -69,13 +52,40 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             objective_function: su_objfuncs.ObjectiveFunction,
             **kwargs: Any
         ) -> Tensor:
-        z_candidates: Tensor = self.sample_discrete(
-            n=self.state.sampling.batch_size,
-            dim=X.shape[0],
-            scramble=True
-        )
+
         pessimistic: Tensor = self.get_pessimistic_safe_subset(
             X=X
+        )
+        def acqf_wrapper(
+                Z: float | npt.NDArray[np.float32]
+                ) -> float | npt.NDArray[np.float32]:
+            penalty: float = float("inf")
+
+            Z_t: Tensor = torch.tensor(Z, dtype=self.dtype, device=self.device)
+            if Z_t.ndim == 1:
+                Z_t: Tensor = Z_t.unsqueeze(0)
+
+            # Ensures that the algorithm abides by constraints
+            if self.state.constraints.is_available():
+                if not self.state.constraints.get_constraints(X=Z):
+                    return penalty
+
+            
+
+            optimistic: Tensor = self.get_optimistic_safe_subset(
+                Z=Z_t,
+                X=X,
+            )
+            if optimistic.ndim == 1:
+                optimistic = optimistic.unsqueeze(0)
+
+            lcb: Tensor = self.surrogate.get_lcb(X=optimistic, beta=self.state.convergence.confidence_level)
+            return lcb.item()
+
+        z_candidates: Tensor = self.de_sampler(
+            n=self.state.sampling.batch_size,
+            acq_func=acqf_wrapper,
+            bounds=self.sanitize_bounds(self.state.data.bounds),
         )
         optimistic: Tensor = self.get_optimistic_safe_subset(
             Z=z_candidates,
@@ -86,8 +96,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             Z_select=optimistic.squeeze(0),
             X=X,
         )
-        return next_candidates
-
+        return next_candidates        
 
     def get_pessimistic_safe_subset(
             self,
@@ -105,40 +114,86 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             X: Tensor,
         ) -> Tensor:
 
-        X_ucb_tensor: Tensor = self.surrogate.get_lcb(
-                X=X, 
-                beta=self.state.convergence.confidence_level
-            )
-                
-        posterior_X: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=X)
-        mean_flat: Tensor = posterior_X.mean.flatten()
-
-        gradients: Tensor = torch.linalg.norm(
-            torch.autograd.grad(
-                outputs=mean_flat,
-                inputs=X,
-                grad_outputs=torch.ones_like(mean_flat),
-            )[0],
-            ord=float("inf"),
-            dim=1
-        )
-
         eucl_distance_XZ: Tensor = torch.cdist(
             x1=X,
             x2=Z,
         )
-
-        L_i: Tensor = torch.amax(gradients)
-        safety: Tensor = X_ucb_tensor - L_i * eucl_distance_XZ
-        mask: Tensor = (safety >= 0.0).any(dim=0)
-
         Z_lcb_tensor: Tensor = self.surrogate.get_lcb(
                 X=Z, 
                 beta=self.state.convergence.confidence_level
             ).squeeze(1)
+        constraint_mask: Tensor = self.get_constraint_mask(
+            X=X,
+            eucl=eucl_distance_XZ,
+            constraints=self.state.constraints.constraints,
+        ).any(dim=0)
 
-        z_masked: Tensor = torch.where(mask, Z_lcb_tensor, float("inf"))
+        z_masked: Tensor = torch.where(constraint_mask, Z_lcb_tensor, float("inf"))
         return Z[torch.argmin(z_masked, dim=0)]
+
+    def get_constraint_mask[
+        T_Constraint: Constraint
+    ](
+            self,
+            X: Tensor,
+            eucl: Tensor,
+            constraints: List[T_Constraint],
+        ) -> Tensor:
+
+        constraint_mask: Tensor = torch.ones_like(
+            eucl, 
+            dtype=torch.bool, 
+            device=self.device
+            )
+        for constraint in constraints:
+            if not isinstance(constraint, SurrogateConstraint):
+                continue
+
+            L_i: Tensor = self.get_ith_lipscitz_constraint(
+                X=X,
+                surrogate_constraint=constraint,
+            )
+
+            u_i: Tensor = self.get_ith_lcb(
+                X=X,
+                surrogate_constraint=constraint,
+            )
+
+            safety: Tensor = (u_i - L_i * eucl) >= 0.
+            constraint_mask: Tensor = constraint_mask & safety
+
+        return constraint_mask
+    def get_ith_lipscitz_constraint(
+            self,
+            X: Tensor,
+            surrogate_constraint: SurrogateConstraint
+        ) -> Tensor:
+
+        with torch.enable_grad():
+            X_grad: Tensor = X.clone().detach().requires_grad_(True)
+
+            mean: Tensor = surrogate_constraint.surrogate.posterior(X=X_grad).mean.flatten()
+            gradients: Tensor = torch.linalg.norm(
+                torch.autograd.grad(
+                    outputs=mean,
+                    inputs=X_grad,
+                    grad_outputs=torch.ones_like(mean),
+                )[0],
+                ord=float("inf"),
+                dim=1
+            )
+            L_i: Tensor = torch.amax(gradients)
+        return L_i.detach()
+    def get_ith_lcb(
+            self,
+            X: Tensor,
+            surrogate_constraint: SurrogateConstraint
+            ) -> Tensor:
+        return surrogate_constraint.surrogate.get_ucb(X=X, beta=self.state.convergence.confidence_level)
+
+        
+
+
 
     def selection(
             self,

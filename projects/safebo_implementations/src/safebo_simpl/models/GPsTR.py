@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
 from safebo_simpl.util import objfuncs as su_objfuncs
+from safebo_simpl.util import typing as su_typing
 
 import torch
 from torch import Tensor
@@ -11,6 +12,9 @@ from torch import Tensor
 import botorch
 from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
+
+import numpy as np
+import numpy.typing as npt
 
 @dataclass
 class BOParams_Convergence_GPsTR(
@@ -50,7 +54,7 @@ class BOParams_GPsTR(
         )
 
         # Setting initial config for dynamic variables across a run
-        self.dynamics.delta_t = (self.convergence.delta_max + self.convergence.delta_min) / 2.
+        self.dynamics.delta_t = self.convergence.delta_min + 0.5 * (self.convergence.delta_max - self.convergence.delta_min)
         self.dynamics.max_iterations = 30    
 
         self.data.negate = False
@@ -78,6 +82,8 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             objective_function=objective_function
             )
 
+        self.center: su_typing.Conditional[Tensor] = None
+
     def train(
             self
             ) -> None:
@@ -91,59 +97,79 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             X: Tensor,
             objective_function: su_objfuncs.ObjectiveFunction,
             **kwargs: Any
-        ) -> Tensor:
+        ) -> su_typing.Conditional[Tensor]:
 
-        x_prev: Tensor = X[-1, :]
+        if self.center is None:
+            self.center: su_typing.Conditional[Tensor] = X[-1, :]
 
-        d_candidates: Tensor = self.sample_discrete(
-            n=X.shape[0],
-            dim=X.shape[1],
-            scramble=True,
-            center=True
-        )
-        d_new: Tensor = self.get_center_next(
-            X=X, 
-            D=d_candidates,
-            delta_t=self.state.dynamics.delta_t,
+        def acqf_wrapper(D: float) -> float:
+            penalty: float = float('inf')
+
+            if self.center is None or \
+                torch.linalg.norm(D, dim=1).item() > self.state.dynamics.delta_t: # Restricts to hypersphere
+                return penalty
+
+            XD: Tensor = self.center + D
+            if self.state.constraints.is_available():
+                constraint_mask: Tensor = self.state.constraints.get_constraints(X=XD)
+                if not constraint_mask.item():
+                    return penalty
+            
+            lcb: Tensor = self.surrogate.get_lcb(XD, beta=self.state.convergence.confidence_level)
+            return lcb.item()
+
+        
+        dt_bds: npt.NDArray[np.float32] = np.array(
+            [[-self.state.dynamics.delta_t, self.state.dynamics.delta_t] for _ in range(self.state.data.dimensions)] 
+            , dtype=np.float32)
+        d_candidate: Tensor = self.de_sampler(
+            n=self.state.sampling.batch_size,
+            acq_func=acqf_wrapper,
+            bounds=dt_bds,
+            maxiter=50,
         )
         accuracy_ratio: float = self.get_accuracy_ratio(
-            X_prev=x_prev.unsqueeze(0),
-            D_next=d_new.unsqueeze(0),
+            X_prev=self.center.unsqueeze(0),
+            D_next=d_candidate.unsqueeze(0),
             objective_function=objective_function,
         )
-        delta_t_new: float = self.get_next_candidates(
+        success, delta_t_new = self.get_next_candidates(
             accuracy_ratio=accuracy_ratio,
             delta_t=self.state.dynamics.delta_t,
         )
 
         self.state.dynamics.delta_t = delta_t_new
+        next_candidates: Tensor = (self.center + d_candidate)
 
-        next_candidates: Tensor = (x_prev + d_new)
+        if success:
+            self.center: su_typing.Conditional[Tensor] = next_candidates
+
         return next_candidates
 
 
     def get_center_next(
             self,
-            X: Tensor,
             D: Tensor,
+            x_prev: Tensor,
             delta_t: float,
         ) -> Tensor:
-        lcb_XD: Tensor = self.surrogate.get_lcb(X=X+D, beta=self.state.convergence.confidence_level)
+        XD: Tensor = x_prev + D
+        lcb_XD: Tensor = self.surrogate.get_lcb(X=XD, beta=self.state.convergence.confidence_level).squeeze()
         eucl_mask: Tensor = (torch.linalg.norm(D, dim=1) <= delta_t)
 
         # Ackley constraint bounds
-        constraint_mask: Tensor = self.state.constraints.get_constraint(X=X)
-        valid_mask: Tensor = constraint_mask & eucl_mask
+        if self.state.constraints.is_available():
+            constraint_mask: Tensor = self.state.constraints.get_constraint(X=XD)
+            valid_mask: Tensor = constraint_mask & eucl_mask
+        else:
+            valid_mask: Tensor = eucl_mask
         if not valid_mask.any():
             return torch.zeros_like(D[0, :])
 
-        masked: Tensor = torch.where(valid_mask.unsqueeze(1), lcb_XD, float("inf"))
-        d_min: Tensor = torch.argmin(input=masked, dim=0)
+        masked: Tensor = torch.where(valid_mask, lcb_XD, float("inf"))
+        d_min: Tensor = torch.argmin(input=masked)
 
-        if d_min.shape[0] > 1:
-            d_min: Tensor = d_min[0, :]
-
-        return D[d_min.squeeze()]
+        return D[d_min]
 
     def get_accuracy_ratio(
             self,
@@ -158,27 +184,25 @@ class GPsTR(su_safe.SafeBOAlgorithm):
         posterior_XD: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=new)
         posterior_X: bp_gpytorch.GPyTorchPosterior  = self.surrogate.posterior(X=X_prev)
         
-        a_num: Tensor = (objective_function.forward(new) - objective_function.forward(X_prev))
-        a_denom: Tensor = posterior_XD.mean - posterior_X.mean
+        a_num: Tensor = (objective_function.forward(new) - objective_function.forward(X_prev)).squeeze()
+        a_denom: Tensor = ((posterior_XD.mean - posterior_X.mean)).squeeze()
         
         ratio: Tensor = a_num/a_denom
-        if ratio.shape[1] != 1:
-            return 0
         return ratio.item()
 
     def get_next_candidates(
             self,
             accuracy_ratio: float,    
             delta_t: float,
-        ) -> float:
+        ) -> Tuple[bool, float]:
 
         state_conv: BOParams_Convergence_GPsTR = self.state.convergence
         
         if accuracy_ratio < state_conv.eta_1:
-            return max(delta_t * state_conv.gamma_red, state_conv.delta_min)
+            return False, max(delta_t * state_conv.gamma_red, state_conv.delta_min)
         if state_conv.eta_1 < accuracy_ratio < state_conv.eta_2:
-            return delta_t
+            return False, delta_t
         else:
-            return min(delta_t * state_conv.gamma_inc, state_conv.delta_max)
+            return True, min(delta_t * state_conv.gamma_inc, state_conv.delta_max)
         
 

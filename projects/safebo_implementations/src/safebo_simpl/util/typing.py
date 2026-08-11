@@ -1,7 +1,8 @@
-from typing import Any
+from typing import Any, Callable
 
 
-type Conditional[T] = T | None
+type AllowUndefined[T] = T | None
+type InitializerCallable[A, T] = Callable[[A], T] | None
 
 def _factory[T](
         val: T | type[T],

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
 from safebo_simpl.util import objfuncs as su_objfuncs
-from safebo_simpl.util.typing import Conditional
+from safebo_simpl.util.typing import AllowUndefined
 
 import torch
 from torch import Tensor
@@ -184,7 +184,7 @@ class SafeBOAlgorithm[
 
     def _train(
             self,
-            single_pass: Callable[[Tensor, su_objfuncs.ObjectiveFunction], Conditional[Tensor]],
+            single_pass: Callable[[Tensor, su_objfuncs.ObjectiveFunction], AllowUndefined[Tensor]],
             metrics: bool = False,
             ) -> None:
 
@@ -200,7 +200,7 @@ class SafeBOAlgorithm[
 
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
-                X_candidates_outs: Conditional[Tensor] = single_pass(
+                X_candidates_outs: AllowUndefined[Tensor] = single_pass(
                     self.X_safe,
                     self.objective_function
                 )

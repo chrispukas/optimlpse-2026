@@ -2,10 +2,11 @@ from typing import Tuple, List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
-from safebo_simpl.util import objfuncs as su_objfuncs
+
+from safebo_simpl.objective_functions import ObjectiveFunction
 
 from safebo_simpl.util.params import BOParams
-from safebo_simpl.util.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
+from safebo_simpl.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
 
 import torch
 from torch import Tensor
@@ -27,7 +28,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             device: torch.device,
 
             state: BOParams,
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             ) -> None:
         super().__init__(
             X, 
@@ -49,7 +50,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
     def forward(
             self,
             X: Tensor,
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             **kwargs: Any
         ) -> Tensor:
 
@@ -67,7 +68,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
 
             # Ensures that the algorithm abides by constraints
             if self.state.constraints.is_available():
-                if not self.state.constraints.get_constraints(X=Z):
+                if not self.state.constraints(X=Z):
                     return penalty
 
             
@@ -190,10 +191,6 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             surrogate_constraint: SurrogateConstraint
             ) -> Tensor:
         return surrogate_constraint.surrogate.get_ucb(X=X, beta=self.state.convergence.confidence_level)
-
-        
-
-
 
     def selection(
             self,

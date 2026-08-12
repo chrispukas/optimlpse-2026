@@ -2,13 +2,11 @@
 import torch
 from torch import Tensor
 
-from safebo_simpl.util.typing import AllowUndefined, InitializerCallable
-from safebo_simpl.util.params import BOParams
-from safebo_simpl.objective_functions.parent import ObjectiveFunction
+from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.objective_functions._parent import ObjectiveFunction
 
-from botorch import test_functions as b_tfuncs
 
-class Ackley(ObjectiveFunction):
+class KeanesBump(ObjectiveFunction):
     def __init__(
         self,
 
@@ -28,7 +26,7 @@ class Ackley(ObjectiveFunction):
             device=device,
             dtype=dtype,
 
-            _default_bounds=(-5.11, 5.11)
+            _default_bounds=(0, 10)
         )
 
     def forward(

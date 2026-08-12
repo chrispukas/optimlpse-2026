@@ -3,39 +3,38 @@ from typing import Any, Unpack, Callable
 import torch
 from torch import Tensor
 
-from safebo_simpl.util import objfuncs, generics, params
+from safebo_simpl.util import generics, params
 from safebo_simpl.util import typing as su_typing
 from botorch import posteriors
 
-class Constraint[
-    T_BOParams: params.BOParams,
-    T_ObjectiveFunction: objfuncs.ObjectiveFunction,
-]:
+class Constraint():
     def __init__(
             self,
             dtype: torch.dtype,
             device: torch.device,
 
-            state: T_BOParams,
-            constraint_function: T_ObjectiveFunction | type[T_ObjectiveFunction],
-
+            *args: Any,
             **kwargs: Any,
             ) -> None:
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
 
-        self.constraint_function: T_ObjectiveFunction = su_typing._factory(constraint_function)
-        self.state: T_BOParams = state
     def __call__(
             self, 
             X: Tensor,
             *args: Any, 
             **kwargs: Any
-            ) -> Tensor:
+        ) -> Tensor:
         return self.forward(
             X=X,
         )
 
+    @staticmethod
+    def _is_valid_tensor(
+        X: Tensor,
+        dim: int
+    ) -> bool:
+        return X.shape[-1] == dim
 
     def fit(
             self,

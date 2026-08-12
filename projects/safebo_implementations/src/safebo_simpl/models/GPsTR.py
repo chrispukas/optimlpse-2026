@@ -3,8 +3,10 @@ from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
-from safebo_simpl.util import objfuncs as su_objfuncs
-from safebo_simpl.util import typing as su_typing
+
+from safebo_simpl.objective_functions import ObjectiveFunction
+
+from safebo_simpl.util.typing import AllowUndefined
 
 import torch
 from torch import Tensor
@@ -71,7 +73,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             device: torch.device,
 
             state: BOParams_GPsTR,
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             ) -> None:
         super().__init__(
             X, 
@@ -82,7 +84,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             objective_function=objective_function
             )
 
-        self.center: su_typing.Conditional[Tensor] = None
+        self.center: AllowUndefined[Tensor] = None
 
     def train(
             self
@@ -95,12 +97,12 @@ class GPsTR(su_safe.SafeBOAlgorithm):
     def forward(
             self,
             X: Tensor,
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             **kwargs: Any
-        ) -> su_typing.Conditional[Tensor]:
+        ) -> AllowUndefined[Tensor]:
 
         if self.center is None:
-            self.center: su_typing.Conditional[Tensor] = X[-1, :]
+            self.center: AllowUndefined[Tensor] = X[-1, :]
 
         def acqf_wrapper(D: float) -> float:
             penalty: float = float('inf')
@@ -111,7 +113,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
 
             XD: Tensor = self.center + D
             if self.state.constraints.is_available():
-                constraint_mask: Tensor = self.state.constraints.get_constraints(X=XD)
+                constraint_mask: Tensor = self.state.constraints(X=XD)
                 if not constraint_mask.item():
                     return penalty
             
@@ -142,7 +144,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
         next_candidates: Tensor = (self.center + d_candidate)
 
         if success:
-            self.center: su_typing.Conditional[Tensor] = next_candidates
+            self.center: AllowUndefined[Tensor] = next_candidates
 
         return next_candidates
 
@@ -176,7 +178,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             X_prev: Tensor,
             D_next: Tensor,
 
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
         ) -> float:
 
         new: Tensor = X_prev + D_next

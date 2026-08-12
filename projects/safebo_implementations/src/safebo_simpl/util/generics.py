@@ -3,8 +3,9 @@ from typing import Tuple, Any, Callable, Generic
 from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
-from safebo_simpl.util import objfuncs as su_objfuncs
 from safebo_simpl.util.typing import AllowUndefined
+
+from safebo_simpl.objective_functions import ObjectiveFunction
 
 import torch
 from torch import Tensor
@@ -162,7 +163,7 @@ class SafeBOAlgorithm[
 
             state: T_BOParams,
 
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             ) -> None:
         super().__init__()
         self.X_safe: Tensor = X_safe
@@ -172,7 +173,7 @@ class SafeBOAlgorithm[
         self.device: torch.device = device
         self.state: T_BOParams = state
 
-        self.objective_function: su_objfuncs.ObjectiveFunction = objective_function
+        self.objective_function: ObjectiveFunction = objective_function
 
         self.surrogate: Surrogate = Surrogate(
             dtype=dtype,
@@ -184,7 +185,7 @@ class SafeBOAlgorithm[
 
     def _train(
             self,
-            single_pass: Callable[[Tensor, su_objfuncs.ObjectiveFunction], AllowUndefined[Tensor]],
+            single_pass: Callable[[Tensor, ObjectiveFunction], AllowUndefined[Tensor]],
             metrics: bool = False,
             ) -> None:
 

@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
-from safebo_simpl.util import objfuncs as su_objfuncs
+
+from safebo_simpl.objective_functions import ObjectiveFunction
 
 import torch
 from torch import Tensor
@@ -45,7 +46,7 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
             device: torch.device,
 
             state: BOParams_SafeOpt,
-            objective_function: su_objfuncs.ObjectiveFunction,
+            objective_function: ObjectiveFunction,
             ) -> None:
         super().__init__(
             X, 
@@ -67,7 +68,7 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
     def forward(
                 self,
                 X: Tensor,
-                objective_function: su_objfuncs.ObjectiveFunction,
+                objective_function: ObjectiveFunction,
                 **kwargs: Any
             ) -> Tensor:
         X_candidates: Tensor = self.sobol_sampler(

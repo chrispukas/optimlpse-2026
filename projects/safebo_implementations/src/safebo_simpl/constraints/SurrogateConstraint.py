@@ -3,16 +3,15 @@ from typing import Any, Unpack, Callable
 import torch
 from torch import Tensor
 
-from safebo_simpl.util import objfuncs, generics, params
+from safebo_simpl.util import generics, params
 from safebo_simpl.util import typing as su_typing
 from botorch import posteriors
 
-from safebo_simpl.constraints.parent import Constraint
+from safebo_simpl.constraints._parent import Constraint
 
 class SurrogateConstraint[
-    T_BOParams: params.BOParams,
-    T_ObjectiveFunction: objfuncs.ObjectiveFunction
-](Constraint[T_BOParams, T_ObjectiveFunction]):
+    T_BOParams: params.BOParams
+](Constraint):
     def __init__(
             self,
             dtype: torch.dtype,
@@ -22,29 +21,14 @@ class SurrogateConstraint[
             Y: Tensor,
 
             state: T_BOParams,
-            constraint_function: T_ObjectiveFunction | type[T_ObjectiveFunction],
-
             bounds: Tensor,
 
+            *args: Any,
             **kwargs: Any,
-            ) -> None:
-        
-        # Pre-define types to expose them to the IDE
-        self.dtype: torch.dtype
-        self.device: torch.device
-
-        self.state: T_BOParams
-        self.constraint_function: T_ObjectiveFunction
-
-        self.bounds: Tensor = bounds.to(device=device, dtype=dtype)
-        self.X: Tensor = X
-        self.Y: Tensor = Y
-        
+            ) -> None:    
         super().__init__(
             dtype=dtype,
             device=device,
-            state=state,
-            constraint_function=constraint_function,
             **kwargs
         )
         self.surrogate: generics.Surrogate = generics.Surrogate(
@@ -54,28 +38,53 @@ class SurrogateConstraint[
             X=X,
             Y=Y,
 
-            state=self.state,
+            state=state,
         )
+
+        self.state: T_BOParams = state
+
+        self.X: Tensor = X
+        self.Y: Tensor = Y
+        self.bounds: Tensor = bounds.to(device=device, dtype=dtype)
 
     def forward(
             self,
             X: Tensor,
             boolmask: bool = True,
             ) -> Tensor:
-        acq: Tensor = self.surrogate.get_ucb(X=X, beta=self.state.convergence.confidence_level)
+        mask: Tensor = self.__func(
+            X=X,
+            beta=self.state.convergence.confidence_level,
 
-        mask: Tensor = torch.ones_like(acq, dtype=torch.bool)
-        mask &= (acq >= self.bounds[0, :]).all(dim=1)
-        mask &= (acq <= self.bounds[1, :]).all(dim=1)
-
+            bounds=self.bounds,
+            acqf=self.surrogate.get_ucb
+        )
         return mask if boolmask else X[mask]
+
+    @staticmethod
+    def __func(
+        X: Tensor,
+        beta: float,
+
+        bounds: Tensor,
+        acqf: Callable[[Tensor, float], Tensor]
+
+    ) -> Tensor:
+        acq: Tensor = acqf(X, beta)
+        
+        ub_m: Tensor = (acq >= bounds[0, :])
+        lb_m: Tensor = (acq <= bounds[1, :])
+
+        return (ub_m & lb_m).all(dim=1)
 
     def fit(
             self,
             X: Tensor,
+
+            *args: Any,
             **kwargs: Any,
             ) -> None:
-        Y_new: Tensor = self.constraint_function.forward(X=X).unsqueeze(-1)
+        Y_new: Tensor = self.state.constraints(X=X).unsqueeze(-1)
 
         self.X = torch.cat([self.X, X])
         self.Y = torch.cat([self.Y, Y_new])

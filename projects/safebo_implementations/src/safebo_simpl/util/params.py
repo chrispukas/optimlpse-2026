@@ -1,10 +1,10 @@
 import copy
 
-from typing import Any, Tuple, List, TypeVar, Generic, Callable, overload
+from typing import Any, List
 from dataclasses import dataclass, field
 
-from safebo_simpl.util import typing as su_typing
-from safebo_simpl.util.constraints import NonSurrogateConstraint, Constraint
+from safebo_simpl.util.typing import AllowUndefined, _factory
+from safebo_simpl.constraints import Constraint
 
 import torch
 from torch import Tensor
@@ -24,14 +24,25 @@ class BOParams_Convergence():
 class BOParams_Constraints[
     T_Constraint: Constraint
     ]:
-    constraints: su_typing.Conditional[List[T_Constraint]] = None
+    constraints: AllowUndefined[List[T_Constraint]] = None
 
+    def __call__(
+            self, 
+            X: Tensor,
+
+            *args: Any, 
+            **kwds: Any
+        ) -> Any:
+        return self._get_constraints(
+            X=X
+        )
+        
     def is_available(
-                self,
-            ) -> bool:
+            self,
+        ) -> bool:
         return bool(self.constraints)
 
-    def get_constraints(
+    def _get_constraints(
             self,
             X: Tensor
         ) -> Tensor:
@@ -80,25 +91,25 @@ class BOParams[
     T_BOParams_Dynamics:    BOParams_Dynamics,
     ]():
 
-    sampling: T_BOParams_Sampling
+    sampling:    T_BOParams_Sampling
     convergence: T_BOParams_Convergence
     constraints: T_BOParams_Constraints
-    data: T_BOParams_Data
-    dynamics: T_BOParams_Dynamics
+    data:        T_BOParams_Data
+    dynamics:    T_BOParams_Dynamics
 
     type Instantiable[T] = T | type[T]
 
     def __init__(
             self, 
-            sampling: Instantiable[T_BOParams_Sampling]  = BOParams_Sampling,
+            sampling:    Instantiable[T_BOParams_Sampling]  =   BOParams_Sampling,
             convergence: Instantiable[T_BOParams_Convergence] = BOParams_Convergence,
             constraints: Instantiable[T_BOParams_Constraints] = BOParams_Constraints,
-            data: Instantiable[T_BOParams_Data] = BOParams_Data,
-            dynamics: Instantiable[T_BOParams_Dynamics] = BOParams_Dynamics,
+            data:        Instantiable[T_BOParams_Data] =        BOParams_Data,
+            dynamics:    Instantiable[T_BOParams_Dynamics] =    BOParams_Dynamics,
             ) -> None:
         
-        self.sampling: T_BOParams_Sampling = su_typing._factory(sampling)
-        self.convergence: T_BOParams_Convergence = su_typing._factory(convergence)
-        self.constraints: T_BOParams_Constraints = su_typing._factory(constraints)
-        self.data: T_BOParams_Data = su_typing._factory(data)
-        self.dynamics: T_BOParams_Dynamics = su_typing._factory(dynamics)
+        self.sampling:    T_BOParams_Sampling =    _factory(sampling)
+        self.convergence: T_BOParams_Convergence = _factory(convergence)
+        self.constraints: T_BOParams_Constraints = _factory(constraints)
+        self.data:        T_BOParams_Data =        _factory(data)
+        self.dynamics:    T_BOParams_Dynamics =    _factory(dynamics)

@@ -43,7 +43,7 @@ class ObjectiveFunction():
         if X.shape[-1] != self.dim:
             raise ValueError(f"Expected last dimension to be of size ({self.dim}), got ({X.shape[-1]})")
 
-        result: Tensor = self.forward(X=x, dim=self.dim)
+        result: Tensor = self.forward(X=x)
         return -result if self.negate else result
 
 
@@ -54,7 +54,7 @@ class ObjectiveFunction():
         dim: int,
     ) -> Tensor:
         return torch.tensor(
-            [[lb] * self.dim, [ub] * self.dim],
+            [[lb] * dim, [ub] * dim],
             device=self.device,
             dtype=self.dtype,
         )
@@ -65,19 +65,16 @@ class ObjectiveFunction():
     ) -> bool:
         if not isinstance(bounds, Tensor):
             raise ValueError("Bounds are not of type Tensor!")
-        mask: Tensor = torch.ones_like(
-            X, 
-            dtype=torch.bool, 
-            device=self.device
-            )
-        mask &= ((bounds[0, :] - X) <= 0) # [batch_size, dim] : True if in bounds (difference is positive)
-        mask &= ((X - bounds[1, :]) <= 0) # [batch_size, dim] : True if in bounds (also positive diff)
+        
+        lb_m: Tensor = ((bounds[0, :] - X) <= 0) # [batch_size, dim] : True if in bounds (difference is positive)
+        ub_m: Tensor = ((X - bounds[1, :]) <= 0) # [batch_size, dim] : True if in bounds (also positive diff)
+
+        mask: Tensor = lb_m & ub_m
         return bool(mask.all().item())
 
     def forward(
             self,
             X: Tensor,
-            dim: int,
             *args: Any,
             **kwargs: Any,
     ) -> Tensor:

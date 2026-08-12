@@ -4,7 +4,7 @@ from torch import Tensor
 
 from safebo_simpl.util.typing import AllowUndefined, InitializerCallable
 from safebo_simpl.util.params import BOParams
-from safebo_simpl.objective_functions.parent import ObjectiveFunction
+from safebo_simpl.objective_functions._parent import ObjectiveFunction
 
 from botorch import test_functions as b_tfuncs
 

@@ -76,12 +76,6 @@ class BOParams_Dynamics():
     max_iterations: int = 10
     current_iteration: int = 1
 
-    def is_exceeded(self):
-            return self.current_iteration > self.max_iterations
-    def increment(self):
-        print(f"Current iteration: {self.current_iteration}")
-        self.current_iteration = self.current_iteration + 1
-
 @dataclass 
 class BOParams[
     T_BOParams_Sampling:    BOParams_Sampling,

@@ -41,7 +41,7 @@ class Surrogate[
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
         self.state: T_BOParams = state
-
+        
         self.refresh_surrogate(
             X=X, 
             Y=Y,
@@ -155,31 +155,32 @@ class SafeBOAlgorithm[
     ]():
     def __init__(
             self,
-            X_safe: Tensor,
-            Y_safe: Tensor,
+            X: Tensor,
+            Y: Tensor,
 
             dtype: torch.dtype,
             device: torch.device,
 
             state: T_BOParams,
-
             objective_function: ObjectiveFunction,
+
+            *args: Any,
+            **kwargs: Any,
             ) -> None:
         super().__init__()
-        self.X_safe: Tensor = X_safe
-        self.Y_safe: Tensor = Y_safe
+        self.X: Tensor = X
+        self.Y: Tensor = Y
 
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
         self.state: T_BOParams = state
 
         self.objective_function: ObjectiveFunction = objective_function
-
         self.surrogate: Surrogate = Surrogate(
             dtype=dtype,
             device=device,
-            X=X_safe,
-            Y=Y_safe,
+            X=X,
+            Y=Y,
             state=state,
         )
 
@@ -189,11 +190,11 @@ class SafeBOAlgorithm[
             metrics: bool = False,
             ) -> None:
 
-        while not self.state.dynamics.is_exceeded():
-            self.state.dynamics.increment()
 
-            X: Tensor = self.X_safe.detach()
-            Y: Tensor = self.Y_safe.detach()
+        for _ in range(self.state.dynamics.max_iterations):
+
+            X: Tensor = self.X.detach()
+            Y: Tensor = self.Y.detach()
 
             self.surrogate.refresh_surrogate(X=X, Y=Y)
             if self.state.constraints.is_available():
@@ -202,29 +203,35 @@ class SafeBOAlgorithm[
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
                 X_candidates_outs: AllowUndefined[Tensor] = single_pass(
-                    self.X_safe,
+                    self.X,
                     self.objective_function
                 )
 
                 if not isinstance(X_candidates_outs, Tensor):
                     continue
 
-                X_candidates: Tensor = X_candidates_outs.unsqueeze(0)
+                X_candidates: Tensor = X_candidates_outs
                 Y_candidates: Tensor = self.objective_function.forward(
                     X=X_candidates,
                 ).unsqueeze(-1)
 
-            self.X_safe: Tensor = torch.cat(
-                (self.X_safe, X_candidates),
+            self.X: Tensor = torch.cat(
+                (self.X, X_candidates),
                 dim=0,
             )
-            self.Y_safe: Tensor = torch.cat(
-                (self.Y_safe, Y_candidates),
+            self.Y: Tensor = torch.cat(
+                (self.Y, Y_candidates),
                 dim=0,
             )
 
             if metrics:
-                print(f"Minimum y-value: {torch.amin(self.Y_safe)}, Maximum y-value: {torch.amax(self.Y_safe)}, Latest: {Y_candidates}")
+                print(f"Minimum y-value: {torch.amin(self.X)}, Maximum y-value: {torch.amax(self.X)}, Latest: {Y_candidates}")
+
+    def train(
+            self,
+    ) -> None:
+        raise NotImplementedError("Training logic not implemented!")
+
 
     # Discrete 'Monte Carlo' sampling
     def sobol_sampler(
@@ -285,10 +292,6 @@ class SafeBOAlgorithm[
             posinf=limit, 
             neginf=-limit
         )
-
-        
-
-        
 
 @dataclass
 class PosteriorState():

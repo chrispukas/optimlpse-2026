@@ -91,7 +91,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             ) -> None:
         super()._train(
             single_pass=self.forward, 
-            metrics=True
+            metrics=False
             )
 
     def forward(
@@ -146,7 +146,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
         if success:
             self.center: AllowUndefined[Tensor] = next_candidates
 
-        return next_candidates
+        return next_candidates.unsqueeze(0)
 
 
     def get_center_next(

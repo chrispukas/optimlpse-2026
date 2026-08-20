@@ -20,7 +20,7 @@ from botorch.posteriors import gpytorch as bp_gpytorch
         
 class GoOSE(su_safe.SafeBOAlgorithm):
     def __init__(
-            self, 
+            self,  
             X: Tensor, 
             Y: Tensor,
 
@@ -44,7 +44,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             ) -> None:
         super()._train(
             single_pass=self.forward, 
-            metrics=True
+            metrics=False
             )
 
     def forward(
@@ -58,23 +58,20 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             X=X
         )
         def acqf_wrapper(
-                Z: float | npt.NDArray[np.float32]
+                Z: Tensor
                 ) -> float | npt.NDArray[np.float32]:
             penalty: float = float("inf")
 
-            Z_t: Tensor = torch.tensor(Z, dtype=self.dtype, device=self.device)
-            if Z_t.ndim == 1:
-                Z_t: Tensor = Z_t.unsqueeze(0)
+            if Z.ndim == 1:
+                Z_t: Tensor = Z.unsqueeze(0)
 
             # Ensures that the algorithm abides by constraints
             if self.state.constraints.is_available():
                 if not self.state.constraints(X=Z):
                     return penalty
 
-            
-
             optimistic: Tensor = self.get_optimistic_safe_subset(
-                Z=Z_t,
+                Z=Z,
                 X=X,
             )
             if optimistic.ndim == 1:
@@ -114,6 +111,9 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             Z: Tensor,
             X: Tensor,
         ) -> Tensor:
+
+        if Z.ndim == 1:
+            Z = Z.unsqueeze(0)
 
         eucl_distance_XZ: Tensor = torch.cdist(
             x1=X,

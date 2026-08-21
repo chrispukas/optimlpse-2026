@@ -206,5 +206,3 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             return False, delta_t
         else:
             return True, min(delta_t * state_conv.gamma_inc, state_conv.delta_max)
-        
-

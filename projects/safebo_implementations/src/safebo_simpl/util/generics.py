@@ -6,6 +6,7 @@ from safebo_simpl.util import params as su_prms
 from safebo_simpl.util.typing import AllowUndefined
 
 from safebo_simpl.objective_functions import ObjectiveFunction
+from safebo_simpl.util.continuity import NormTensor
 
 import torch
 from torch import Tensor
@@ -25,6 +26,8 @@ from botorch import fit as b_fit
 import numpy as np
 import numpy.typing as npt
 from scipy.optimize import differential_evolution
+
+from contextlib import contextmanager
 
 class Surrogate[
     T_BOParams: su_prms.BOParams
@@ -196,14 +199,24 @@ class SafeBOAlgorithm[
             X: Tensor = self.X.detach()
             Y: Tensor = self.Y.detach()
 
-            self.surrogate.refresh_surrogate(X=X, Y=Y)
-            if self.state.constraints.is_available():
-                self.state.constraints.refresh_constraints(X=X)
-
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
+                # Normalize X, and Y here
+                X_normT: NormTensor = NormTensor(X)
+                X_norm: Tensor = X_normT.normalize(X)
+
+                Y_normT: NormTensor = NormTensor(Y)
+                Y_norm: Tensor = Y_normT.normalize(Y)
+
+                self.objective_function
+
+                # Ensures that the GP is trained on the normalized values (also the objective function is scaled...)
+                self._refresh(
+                    X=X_norm, 
+                    Y=Y_norm
+                    )
                 X_candidates_outs: AllowUndefined[Tensor] = single_pass(
-                    self.X,
+                    X_norm,
                     self.objective_function
                 )
 
@@ -211,16 +224,24 @@ class SafeBOAlgorithm[
                     continue
 
                 X_candidates: Tensor = X_candidates_outs
+                if X_candidates.ndim == 1:
+                    X_candidates: Tensor = X_candidates.unsqueeze(0)
+
                 Y_candidates: Tensor = self.objective_function.forward(
                     X=X_candidates,
                 ).unsqueeze(-1)
 
+
+                # Denormalize X and Y here
+                X_cand_denorm: Tensor = X_normT.denormalize(X_candidates)
+                Y_cand_denorm: Tensor = Y_normT.denormalize(Y_candidates)
+
             self.X: Tensor = torch.cat(
-                (self.X, X_candidates),
+                (self.X, X_cand_denorm),
                 dim=0,
             )
             self.Y: Tensor = torch.cat(
-                (self.Y, Y_candidates),
+                (self.Y, Y_cand_denorm),
                 dim=0,
             )
 
@@ -231,6 +252,15 @@ class SafeBOAlgorithm[
             self,
     ) -> None:
         raise NotImplementedError("Training logic not implemented!")
+
+    def _refresh(
+            self,
+            X: Tensor,
+            Y: Tensor,
+            ) -> None:
+        self.surrogate.refresh_surrogate(X=X, Y=Y)
+        if self.state.constraints.is_available():
+            self.state.constraints.refresh_constraints(X=X)
 
 
     # Discrete 'Monte Carlo' sampling
@@ -323,8 +353,8 @@ class PosteriorState():
             if not isinstance(posterior, bp_gpytorch.GPyTorchPosterior):
                 raise ValueError(f"Posterior is the incorrect class ({posterior.__class__.__name__})!")
             
-            self.posterior = posterior
-            self.X = x
+            self.posterior: bp_gpytorch.GPyTorchPosterior | None = posterior
+            self.X: Tensor | None = x
             return
 
     @property

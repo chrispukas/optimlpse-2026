@@ -73,6 +73,10 @@ class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
             x_real: NDArray[np.float64] = self.lb + xi * self.span
             val: float = float(self.f_budgeted(x_real))
             y_list.append(val)
+
+        Y_tensor: Tensor = torch.tensor(y_list, dtype=self.dtype, device=self.device)
+        if Y_tensor.ndim == 1:
+            Y_tensor: Tensor = Y_tensor.unsqueeze(0)
             
         return torch.tensor(y_list, dtype=self.dtype, device=self.device)
 
@@ -285,7 +289,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 class ModelState():
     n_restarts: int = 0
     termination: str = "normal"
-    max_fit_restarts: int = 25
+    max_fit_restarts: int = 50
 
     def increment(
             self

@@ -78,7 +78,7 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
         )
         Z_candidates: Tensor = self.sobol_sampler(
             n=self.state.sampling.batch_size,
-            dim=self.state.sampling.dimensions,
+            dim=self.state.data.dimensions,
             scramble=True
         )
 

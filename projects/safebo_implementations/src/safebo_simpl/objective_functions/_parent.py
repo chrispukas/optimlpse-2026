@@ -4,11 +4,13 @@ import torch
 from torch import Tensor
 
 from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.util.continuity import NormTensor
 
 class ObjectiveFunction():
     def __init__(
             self,
             dim: int,
+
             negate: bool = False,
             bounds: AllowUndefined[Tensor] = None,
 
@@ -17,6 +19,10 @@ class ObjectiveFunction():
 
             _default_bounds: Tuple[float, float] = (-1, 1),
             ) -> None:
+
+        self.x_normtensor: AllowUndefined[NormTensor] = None
+        self.y_normtensor: AllowUndefined[NormTensor] = None
+        
         self.dim: int = dim
         self.negate: bool = negate
         
@@ -42,9 +48,22 @@ class ObjectiveFunction():
             raise ValueError("X must be of type Tensor!")
         if X.shape[-1] != self.dim:
             raise ValueError(f"Expected last dimension to be of size ({self.dim}), got ({X.shape[-1]})")
+        if not isinstance(self.x_normtensor, NormTensor) or not isinstance(self.y_normtensor, NormTensor):
+            raise ValueError(f"Normalization objects for X, and Y do not exist!")
 
-        result: Tensor = self.forward(X=x)
-        return -result if self.negate else result
+        x_denorm: Tensor = self.x_normtensor.denormalize(x)
+        result: Tensor = self.forward(X=x_denorm)
+        y_norm: Tensor = self.y_normtensor.normalize(result)
+
+        return -y_norm if self.negate else y_norm
+
+    def _set_norms(
+            self,
+            X_normtensor: NormTensor,
+            Y_normtensor: NormTensor
+    ) -> None:
+        self.x_normtensor: AllowUndefined[NormTensor] = X_normtensor
+        self.x_normtensor: AllowUndefined[NormTensor] = Y_normtensor
 
 
     def _generate_default_bounds(

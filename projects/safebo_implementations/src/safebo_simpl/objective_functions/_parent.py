@@ -63,7 +63,7 @@ class ObjectiveFunction():
             Y_normtensor: NormTensor
     ) -> None:
         self.x_normtensor: AllowUndefined[NormTensor] = X_normtensor
-        self.x_normtensor: AllowUndefined[NormTensor] = Y_normtensor
+        self.y_normtensor: AllowUndefined[NormTensor] = Y_normtensor
 
 
     def _generate_default_bounds(

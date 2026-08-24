@@ -78,7 +78,7 @@ class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
         if Y_tensor.ndim == 1:
             Y_tensor: Tensor = Y_tensor.unsqueeze(0)
             
-        return torch.tensor(y_list, dtype=self.dtype, device=self.device)
+        return torch.tensor(y_list, dtype=self.dtype, device=self.device).nan_to_num(0.)
 
 class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams]():
     def __init__(

@@ -68,8 +68,8 @@ class Surrogate[
                 Y: Tensor,
             ) -> Surrogate:
         (self.surrogate_model, self.surrogate_likelihood) = self._create_surrogate(
-            X=X.detach(),
-            Y=Y.detach(),
+            X=X.detach().nan_to_num(0.),
+            Y=Y.detach().nan_to_num(0.),
         )
         with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
             b_fit.fit_gpytorch_mll(mll=self.surrogate_likelihood)
@@ -230,7 +230,6 @@ class SafeBOAlgorithm[
                 Y_candidates: Tensor = self.objective_function.forward(
                     X=X_candidates,
                 ).unsqueeze(-1)
-
 
                 # Denormalize X and Y here
                 X_cand_denorm: Tensor = X_normT.denormalize(X_candidates)

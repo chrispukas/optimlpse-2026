@@ -5,6 +5,7 @@ from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
 
 from safebo_simpl.objective_functions import ObjectiveFunction
+from safebo_simpl.util.continuity import NormTensor
 
 from safebo_simpl.util.typing import AllowUndefined
 
@@ -14,6 +15,8 @@ from torch import Tensor
 import botorch
 from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
+
+import gpytorch
 
 import numpy as np
 import numpy.typing as npt
@@ -85,6 +88,87 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             )
 
         self.center: AllowUndefined[Tensor] = None
+        self.center_y: AllowUndefined[Tensor] = None
+
+    
+    def _train(
+            self,
+            single_pass: Callable[[Tensor, ObjectiveFunction], AllowUndefined[Tensor]],
+            metrics: bool = False,
+            ) -> None:
+        for _ in range(self.state.dynamics.max_iterations):
+
+            X: Tensor = self.X.detach()
+            Y: Tensor = self.Y.detach()
+
+            with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
+
+                # Normalize X, and Y here
+                X_normT: NormTensor = NormTensor(X)
+                X_norm: Tensor = X_normT.normalize(X)
+
+                Y_normT: NormTensor = NormTensor(Y)
+                Y_norm: Tensor = Y_normT.normalize(Y)
+
+                self.objective_function
+
+                # Ensures that the GP is trained on the normalized values (also the objective function is scaled...)
+                self._refresh(
+                    X=X_norm, 
+                    Y=Y_norm
+                    )
+                X_candidates_outs: AllowUndefined[Tensor] = single_pass(
+                    X_norm,
+                    self.objective_function
+                )
+
+                if not isinstance(X_candidates_outs, Tensor):
+                    continue
+
+                X_candidates: Tensor = X_candidates_outs
+                if X_candidates.ndim == 1:
+                    X_candidates: Tensor = X_candidates.unsqueeze(0)
+
+                Y_candidates: Tensor = self.objective_function(
+                    X=X_candidates,
+                ).unsqueeze(-1)
+
+                if self.center is None or self.center_y is None:
+                    raise ValueError("Center cannot be none!")
+
+                accuracy_ratio: float = self.get_accuracy_ratio(
+                        X_prev=self.center.unsqueeze(0),
+                        Y_prev=self.center_y.unsqueeze(0),
+
+                        X_new=X_candidates,
+                        Y_new=Y_candidates,
+                    )
+                success, delta_t_new = self.get_next_candidates(
+                        accuracy_ratio=accuracy_ratio,
+                        delta_t=self.state.dynamics.delta_t,
+                    )
+                
+                self.state.dynamics.delta_t = delta_t_new
+                if success:
+                    self.center: AllowUndefined[Tensor] = X_candidates
+                    self.center_y: AllowUndefined[Tensor] = Y_candidates
+
+                    # Denormalize X and Y here
+                X_cand_denorm: Tensor = X_normT.denormalize(X_candidates)
+                Y_cand_denorm: Tensor = Y_normT.denormalize(Y_candidates)
+
+            self.X: Tensor = torch.cat(
+                (self.X, X_cand_denorm),
+                dim=0,
+            )
+            self.Y: Tensor = torch.cat(
+                (self.Y, Y_cand_denorm),
+                dim=0,
+            )
+
+            if metrics:
+                print(f"Minimum y-value: {torch.amin(self.X)}, Maximum y-value: {torch.amax(self.X)}, Latest: {Y_candidates}")
+
 
     def train(
             self
@@ -120,7 +204,6 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             lcb: Tensor = self.surrogate.get_lcb(XD, beta=self.state.convergence.confidence_level)
             return lcb.item()
 
-        
         dt_bds: npt.NDArray[np.float32] = np.array(
             [[-self.state.dynamics.delta_t, self.state.dynamics.delta_t] for _ in range(self.state.data.dimensions)] 
             , dtype=np.float32)
@@ -130,22 +213,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             bounds=dt_bds,
             maxiter=50,
         )
-        accuracy_ratio: float = self.get_accuracy_ratio(
-            X_prev=self.center.unsqueeze(0),
-            D_next=d_candidate.unsqueeze(0),
-            objective_function=objective_function,
-        )
-        success, delta_t_new = self.get_next_candidates(
-            accuracy_ratio=accuracy_ratio,
-            delta_t=self.state.dynamics.delta_t,
-        )
-
-        self.state.dynamics.delta_t = delta_t_new
         next_candidates: Tensor = (self.center + d_candidate)
-
-        if success:
-            self.center: AllowUndefined[Tensor] = next_candidates
-
         return next_candidates.unsqueeze(0)
 
 
@@ -176,17 +244,15 @@ class GPsTR(su_safe.SafeBOAlgorithm):
     def get_accuracy_ratio(
             self,
             X_prev: Tensor,
-            D_next: Tensor,
+            Y_prev: Tensor,
 
-            objective_function: ObjectiveFunction,
+            X_new: Tensor,
+            Y_new: Tensor,
         ) -> float:
-
-        new: Tensor = X_prev + D_next
-
-        posterior_XD: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=new)
+        posterior_XD: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=X_new)
         posterior_X: bp_gpytorch.GPyTorchPosterior  = self.surrogate.posterior(X=X_prev)
         
-        a_num: Tensor = (objective_function.forward(new) - objective_function.forward(X_prev)).squeeze()
+        a_num: Tensor = (Y_new - Y_prev).squeeze()
         a_denom: Tensor = ((posterior_XD.mean - posterior_X.mean)).squeeze()
         
         ratio: Tensor = a_num/a_denom

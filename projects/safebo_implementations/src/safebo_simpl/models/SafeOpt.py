@@ -62,7 +62,7 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
             ) -> None:
         super()._train(
             single_pass=self.forward, 
-            metrics=True
+            metrics=False
             )
 
     def forward(
@@ -131,6 +131,9 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
             x1=X, 
             x2=Z
         )
+
+        X.requires_grad_(True)
+
         posterior_X: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=X)
         mean_flat: Tensor = posterior_X.mean.flatten()
 
@@ -171,6 +174,3 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
         beta: float = self.state.convergence.confidence_level
         posterior: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=X)
         return torch.sqrt(posterior.variance) * beta * 2
-
-
-    ... # INSERT FUNCTIONS FOR LOGIC HERE

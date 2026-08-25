@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from safebo_simpl.util.typing import AllowUndefined, _factory
 from safebo_simpl.constraints import Constraint
+from safebo_simpl.util.continuity import NormTensor
 
 import torch
 from torch import Tensor
@@ -52,7 +53,7 @@ class BOParams_Constraints[
         mask: Tensor = copy.copy(DEFAULT)
 
         for constraint in self.constraints:
-            mask: Tensor = mask & constraint.forward(X=X)
+            mask: Tensor = mask & constraint(X=X)
         return mask
     
     def refresh_constraints(
@@ -64,6 +65,20 @@ class BOParams_Constraints[
 
         for constraint in self.constraints:
             constraint.fit(X=X)
+    def _set_norms(
+                self,
+                X_normtensor: NormTensor,
+                Y_normtensor: NormTensor
+        ) -> None:
+        if not self.constraints:
+            return
+        
+        for constraint in self.constraints:
+            constraint._set_norms(
+                X_normtensor=X_normtensor,
+                Y_normtensor=Y_normtensor,
+            )
+                
 
 
 @dataclass

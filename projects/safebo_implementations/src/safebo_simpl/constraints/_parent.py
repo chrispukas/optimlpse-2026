@@ -4,7 +4,8 @@ import torch
 from torch import Tensor
 
 from safebo_simpl.util import generics, params
-from safebo_simpl.util import typing as su_typing
+from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.util.continuity import NormTensor
 from botorch import posteriors
 
 class Constraint():
@@ -19,15 +20,34 @@ class Constraint():
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
 
+        self.x_normtensor: AllowUndefined[NormTensor] = None
+        self.y_normtensor: AllowUndefined[NormTensor] = None
+
+    def _set_norms(
+                self,
+                X_normtensor: NormTensor,
+                Y_normtensor: NormTensor
+        ) -> None:
+            self.x_normtensor: AllowUndefined[NormTensor] = X_normtensor
+            self.y_normtensor: AllowUndefined[NormTensor] = Y_normtensor
+
     def __call__(
             self, 
             X: Tensor,
             *args: Any, 
             **kwargs: Any
         ) -> Tensor:
-        return self.forward(
-            X=X,
+        """
+            Accepts a normalized X tensor, returns a boolmask
+        """
+        if not isinstance(self.x_normtensor, NormTensor):
+             raise ValueError("Normalization Tensor for X is not set!")
+
+        X_denorm: Tensor = self.x_normtensor.denormalize(X)
+        result: Tensor = self.forward(
+            X=X_denorm,
         )
+        return result
 
     @staticmethod
     def _is_valid_tensor(

@@ -52,8 +52,8 @@ class ObjectiveFunction():
             raise ValueError(f"Normalization objects for X, and Y do not exist!")
 
         x_denorm: Tensor = self.x_normtensor.denormalize(x)
-        result: Tensor = self.forward(X=x_denorm)
-        y_norm: Tensor = self.y_normtensor.normalize(result)
+        y_norm: Tensor = self.forward(X=x_denorm)
+        
 
         return -y_norm if self.negate else y_norm
 

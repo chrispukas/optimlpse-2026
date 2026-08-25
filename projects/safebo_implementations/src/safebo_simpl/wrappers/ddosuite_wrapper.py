@@ -19,14 +19,54 @@ from ddo_suite.algorithms.base import (
     budget_remaining,
     build_result,
     make_budgeted_callable,
+    make_constrained_callable
 )
 
 from safebo_simpl.util.generics import SafeBOAlgorithm
 from safebo_simpl.util.params import BOParams
 from safebo_simpl.util.typing import AllowUndefined
 from safebo_simpl.objective_functions import ObjectiveFunction
+from safebo_simpl.constraints import Constraint
 
 from botorch.exceptions import ModelFittingError
+
+
+from typing import Callable
+import torch
+from torch import Tensor
+import numpy as np
+from numpy.typing import NDArray
+
+class DDOSuite_ConstraintWrapper(Constraint):
+    def __init__(
+        self,
+        f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]],
+        lb: NDArray[np.float64],
+        span: NDArray[np.float64],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        super().__init__(dtype=dtype, device=device)
+        self.f_budgeted = f_budgeted
+        self.lb = lb
+        self.span = span
+
+    def forward(self, X: Tensor) -> Tensor:
+        X_np = X.detach().cpu().numpy()
+        c_list = []
+        
+        for xi in X_np:
+            x_real = self.lb + xi * self.span
+            _, constraints = self.f_budgeted(x_real)
+            c_list.append(constraints)
+        C = torch.tensor(np.stack(c_list), dtype=self.dtype, device=self.device).nan_to_num(0.)
+
+        return (C <= 0.).all(dim=-1)
+    def fit(
+            self,
+            X: Tensor,
+        ) -> None:
+            ...
 
 
 class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
@@ -76,7 +116,7 @@ class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
 
         Y_tensor: Tensor = torch.tensor(y_list, dtype=self.dtype, device=self.device)
         if Y_tensor.ndim == 1:
-            Y_tensor: Tensor = Y_tensor.unsqueeze(0)
+            Y_tensor: Tensor = Y_tensor.unsqueeze(-1)
             
         return torch.tensor(y_list, dtype=self.dtype, device=self.device).nan_to_num(0.)
 
@@ -138,6 +178,21 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             device=self.device,
             maximize=self.maximize_objective
         )
+
+        if hasattr(problem, "c_list"):
+            adapted_constraint: DDOSuite_ConstraintWrapper = DDOSuite_ConstraintWrapper(
+                f_budgeted=make_constrained_callable(problem=problem, max_evals=max_evals),
+                lb=lb,
+                span=span,
+                dtype=self.dtype,
+                device=self.device,
+            )
+
+            if isinstance(self.params.constraints.constraints, list):
+                self.params.constraints.constraints.append(adapted_constraint)
+            else:
+                self.params.constraints.constraints = [adapted_constraint]
+
         state: ModelState = ModelState()
         res: OptimizationResult = self._error_object(
             dim=problem.n_x,
@@ -148,6 +203,9 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 
         for _ in range(state.max_fit_restarts):
             problem.reset()
+            if hasattr(problem, "c_list") and isinstance(problem.c_list, list):
+                problem.c_list.clear()
+
             state.increment()
             res: OptimizationResult = self._attempt_run(
                 problem=problem,
@@ -176,6 +234,8 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 
             while (rem := budget_remaining(problem=problem, max_evals=max_evals)) > 0:
 
+                print(max_evals, len(problem.f_list))
+
                 init_seed: int = int(rng.integers(0, 2**31 - 1))
                 batch_size: int = self._get_rem_samples(maximum=self.params.sampling.initial_candidates, remaining=rem)
                 sobol: SobolEngine = SobolEngine(dimension=dim, scramble=True, seed=init_seed)
@@ -183,7 +243,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
                 self.params.data.dimensions = dim
                 self.params.data.bounds = problem.bounds
                     
-                X: Tensor = sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device)
+                X: Tensor = sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device) # Returns a tensor between 0, and 1
                 Y: Tensor = adapted_objective.forward(X).unsqueeze(-1)
 
                 self.algorithm: T_Algorithm = self.uninitialized_algorithm(
@@ -197,6 +257,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 
                 self._refresh()
                 self.algorithm.train()
+                print(max_evals, len(problem.f_list))
         except ModelFittingError:
             return self._error_object(
                 dim=problem.n_x,
@@ -208,6 +269,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             )
         except BudgetExhausted:
             state.termination = "budget_exhausted"
+            print(max_evals, len(problem.f_list))
         except Exception as exc:
             traceback.print_exc()
             exc_traceback: str = repr(exc)
@@ -289,7 +351,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 class ModelState():
     n_restarts: int = 0
     termination: str = "normal"
-    max_fit_restarts: int = 50
+    max_fit_restarts: int = 8
 
     def increment(
             self

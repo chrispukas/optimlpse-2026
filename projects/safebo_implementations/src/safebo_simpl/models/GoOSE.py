@@ -6,7 +6,9 @@ from safebo_simpl.util import generics as su_safe
 from safebo_simpl.objective_functions import ObjectiveFunction
 
 from safebo_simpl.util.params import BOParams
+from safebo_simpl.util.continuity import NormTensor
 from safebo_simpl.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
+from safebo_simpl.util.math import LipschitzConstraints
 
 import torch
 from torch import Tensor
@@ -38,6 +40,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             state=state,
             objective_function=objective_function
             )
+        self.bounds: npt.NDArray[np.float32] = np.array([[0.0, 1.0] for _ in range(self.state.data.dimensions)], dtype=np.float32)
 
     def train(
             self
@@ -54,25 +57,30 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             **kwargs: Any
         ) -> Tensor:
 
+        # Compute lipschitz constraints at the beginning of the loop (cached once for next computations)
+        lipschitz: LipschitzConstraints = LipschitzConstraints(self.state.convergence.confidence_level)
+        constraints: List[Tuple[Tensor, Tensor]] = lipschitz.get_constraint_list(X, self.state.constraints.constraints)
+
+        # Calculate the pessimistic safe subset (independent from others)
         pessimistic: Tensor = self.get_pessimistic_safe_subset(
-            X=X
+            X=X # returns a normalized t
         )
         def acqf_wrapper(
                 Z: Tensor
                 ) -> float | npt.NDArray[np.float32]:
             penalty: float = float("inf")
 
-            if Z.ndim == 1:
-                Z_t: Tensor = Z.unsqueeze(0)
-
             # Ensures that the algorithm abides by constraints
+            if not isinstance(self.objective_function.x_normtensor, NormTensor):
+                raise ValueError("Normalization for x not set in the objective function!")
             if self.state.constraints.is_available():
-                if not self.state.constraints(X=Z):
+                if not self.state.constraints(X=self.objective_function.x_normtensor.denormalize(X=Z)):
                     return penalty
 
             optimistic: Tensor = self.get_optimistic_safe_subset(
                 Z=Z,
                 X=X,
+                constraints=constraints
             )
             if optimistic.ndim == 1:
                 optimistic = optimistic.unsqueeze(0)
@@ -83,33 +91,35 @@ class GoOSE(su_safe.SafeBOAlgorithm):
         z_candidates: Tensor = self.de_sampler(
             n=self.state.sampling.batch_size,
             acq_func=acqf_wrapper,
-            bounds=self.sanitize_bounds(self.state.data.bounds),
+            bounds=self.bounds,
         )
         optimistic: Tensor = self.get_optimistic_safe_subset(
             Z=z_candidates,
             X=X,
+            constraints=constraints
         )
         next_candidates: Tensor = self.selection(
             X_select=pessimistic,
             Z_select=optimistic.squeeze(0),
             X=X,
         )
-        return next_candidates        
+        return next_candidates
 
     def get_pessimistic_safe_subset(
             self,
             X: Tensor,
         ) -> Tensor:
-        ucb_tensor: Tensor = self.surrogate.get_lcb(
+        lcb_tensor: Tensor = self.surrogate.get_lcb(
             X=X, 
             beta=self.state.convergence.confidence_level
             ).squeeze(1)
-        return X[torch.argmin(ucb_tensor, dim=0)]
+        return X[torch.argmin(lcb_tensor, dim=0)]
 
     def get_optimistic_safe_subset(
             self,
             Z: Tensor,
             X: Tensor,
+            constraints: List[Tuple[Tensor, Tensor]]
         ) -> Tensor:
 
         if Z.ndim == 1:
@@ -124,21 +134,17 @@ class GoOSE(su_safe.SafeBOAlgorithm):
                 beta=self.state.convergence.confidence_level
             ).squeeze(1)
         constraint_mask: Tensor = self.get_constraint_mask(
-            X=X,
             eucl=eucl_distance_XZ,
-            constraints=self.state.constraints.constraints,
+            constraints=constraints,
         ).any(dim=0)
 
         z_masked: Tensor = torch.where(constraint_mask, Z_lcb_tensor, float("inf"))
         return Z[torch.argmin(z_masked, dim=0)]
 
-    def get_constraint_mask[
-        T_Constraint: Constraint
-    ](
+    def get_constraint_mask(
             self,
-            X: Tensor,
             eucl: Tensor,
-            constraints: List[T_Constraint],
+            constraints: List[Tuple[Tensor, Tensor]],
         ) -> Tensor:
 
         constraint_mask: Tensor = torch.ones_like(
@@ -146,51 +152,11 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             dtype=torch.bool, 
             device=self.device
             )
-        for constraint in constraints:
-            if not isinstance(constraint, SurrogateConstraint):
-                continue
-
-            L_i: Tensor = self.get_ith_lipscitz_constraint(
-                X=X,
-                surrogate_constraint=constraint,
-            )
-
-            u_i: Tensor = self.get_ith_lcb(
-                X=X,
-                surrogate_constraint=constraint,
-            )
-
+        for (L_i, u_i) in constraints:
             safety: Tensor = (u_i - L_i * eucl) >= 0.
             constraint_mask: Tensor = constraint_mask & safety
 
         return constraint_mask
-    def get_ith_lipscitz_constraint(
-            self,
-            X: Tensor,
-            surrogate_constraint: SurrogateConstraint
-        ) -> Tensor:
-
-        with torch.enable_grad():
-            X_grad: Tensor = X.clone().detach().requires_grad_(True)
-
-            mean: Tensor = surrogate_constraint.surrogate.posterior(X=X_grad).mean.flatten()
-            gradients: Tensor = torch.linalg.norm(
-                torch.autograd.grad(
-                    outputs=mean,
-                    inputs=X_grad,
-                    grad_outputs=torch.ones_like(mean),
-                )[0],
-                ord=float("inf"),
-                dim=1
-            )
-            L_i: Tensor = torch.amax(gradients)
-        return L_i.detach()
-    def get_ith_lcb(
-            self,
-            X: Tensor,
-            surrogate_constraint: SurrogateConstraint
-            ) -> Tensor:
-        return surrogate_constraint.surrogate.get_ucb(X=X, beta=self.state.convergence.confidence_level)
 
     def selection(
             self,

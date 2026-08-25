@@ -6,7 +6,7 @@ from safebo_simpl.util import params as su_prms
 from safebo_simpl.util.typing import AllowUndefined
 
 from safebo_simpl.objective_functions import ObjectiveFunction
-from safebo_simpl.util.continuity import NormTensor
+from safebo_simpl.util.continuity import NormTensor, StandardizationType
 
 import torch
 from torch import Tensor
@@ -193,6 +193,10 @@ class SafeBOAlgorithm[
             metrics: bool = False,
             ) -> None:
 
+        X_normalization_object: NormTensor = NormTensor(
+            self.objective_function.bounds, 
+            method=StandardizationType.MinMax
+            ) # Static minmax based on the objective function bounds.
 
         for _ in range(self.state.dynamics.max_iterations):
 
@@ -201,39 +205,49 @@ class SafeBOAlgorithm[
 
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
-                # Normalize X, and Y here
-                X_normT: NormTensor = NormTensor(X)
-                X_norm: Tensor = X_normT.normalize(X)
+                Y_normalization_object: NormTensor = NormTensor(Y, method=StandardizationType.ZScore)
 
-                Y_normT: NormTensor = NormTensor(Y)
-                Y_norm: Tensor = Y_normT.normalize(Y)
+                # Normalize X, and Y here, provide this information to the objective function.
+                X_normalized_train: Tensor = X_normalization_object.normalize(X)
+                Y_normalized_train: Tensor = Y_normalization_object.normalize(Y)
 
-                self.objective_function
-
-                # Ensures that the GP is trained on the normalized values (also the objective function is scaled...)
-                self._refresh(
-                    X=X_norm, 
-                    Y=Y_norm
+                self.objective_function._set_norms(
+                    X_normtensor=X_normalization_object, 
+                    Y_normtensor=Y_normalization_object
                     )
-                X_candidates_outs: AllowUndefined[Tensor] = single_pass(
-                    X_norm,
+                self.state.constraints._set_norms(
+                    X_normtensor=X_normalization_object,
+                    Y_normtensor=Y_normalization_object,
+                )
+
+                # X_normalized_train -> | GP | -> Y_normalized_train, the GP is trained on the normalized/standardized data
+                self._refresh(
+                    X=X_normalized_train, 
+                    Y=Y_normalized_train
+                    )
+                
+                X_normalized_candidates: AllowUndefined[Tensor] = single_pass(
+                    X_normalized_train,
                     self.objective_function
                 )
 
-                if not isinstance(X_candidates_outs, Tensor):
+                if not isinstance(X_normalized_candidates, Tensor):
                     continue
 
-                X_candidates: Tensor = X_candidates_outs
+                X_candidates: Tensor = X_normalized_candidates
                 if X_candidates.ndim == 1:
                     X_candidates: Tensor = X_candidates.unsqueeze(0)
 
-                Y_candidates: Tensor = self.objective_function.forward(
+                # X_norm -> | GP | -> Y_norm (Y_candidates)
+                Y_candidates: Tensor = self.objective_function(
                     X=X_candidates,
-                ).unsqueeze(-1)
+                )
+                if Y_candidates.ndim == 1:
+                    Y_candidates: Tensor = Y_candidates.unsqueeze(-1)
 
-                # Denormalize X and Y here
-                X_cand_denorm: Tensor = X_normT.denormalize(X_candidates)
-                Y_cand_denorm: Tensor = Y_normT.denormalize(Y_candidates)
+                # (X_norm_test, Y_norm_test) -> | denormalization| -> (X_test, Y_test)
+                X_cand_denorm: Tensor = X_normalization_object.denormalize(X_candidates)
+                Y_cand_denorm: Tensor = Y_normalization_object.denormalize(Y_candidates)
 
             self.X: Tensor = torch.cat(
                 (self.X, X_cand_denorm),

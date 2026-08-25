@@ -3,8 +3,10 @@ from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
+from safebo_simpl.util.math import LipschitzConstraints
 
 from safebo_simpl.objective_functions import ObjectiveFunction
+from safebo_simpl.util.continuity import NormTensor
 
 import torch
 from torch import Tensor
@@ -12,6 +14,9 @@ from torch import Tensor
 import botorch
 from botorch import models as b_models
 from botorch.posteriors import gpytorch as bp_gpytorch
+
+import numpy as np
+import numpy.typing as npt
 
 @dataclass
 class BOParams_SafeOpt(
@@ -71,11 +76,9 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
                 objective_function: ObjectiveFunction,
                 **kwargs: Any
             ) -> Tensor:
-        X_candidates: Tensor = self.sobol_sampler(
-            n=self.state.sampling.batch_size,
-            dim=self.state.data.dimensions,
-            scramble=True
-        )
+        lipschitz: LipschitzConstraints = LipschitzConstraints(self.state.convergence.confidence_level)
+        constraints: List[Tuple[Tensor, Tensor]] = lipschitz.get_constraint_list(X, self.state.constraints.constraints)
+
         Z_candidates: Tensor = self.sobol_sampler(
             n=self.state.sampling.batch_size,
             dim=self.state.data.dimensions,
@@ -83,17 +86,18 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
         )
 
         uncertainty_candidates: Tensor = self.get_uncertainty(
-            X=X_candidates
+            X=X
         )
         minimizer: Tensor = self.get_minimizer_set_guess(
-            X=X_candidates,
+            X=X,
             Z=Z_candidates,
             W=uncertainty_candidates,
         )
         expander: Tensor = self.get_expander_set_guess(
-            X=X_candidates,
+            X=X,
             Z=Z_candidates,
             W=uncertainty_candidates,
+            constraints=constraints,
         )
 
         next_candidates: Tensor = self.select_next_candidate(
@@ -124,34 +128,37 @@ class SafeOpt(su_safe.SafeBOAlgorithm):
         X: Tensor,
         Z: Tensor,
         W: Tensor,
+        constraints: List[Tuple[Tensor, Tensor]],
     ) -> Tensor:
-        beta: float = self.state.convergence.confidence_level
-
         eucl_distances: Tensor = torch.cdist(
             x1=X, 
             x2=Z
         )
 
-        X.requires_grad_(True)
-
-        posterior_X: bp_gpytorch.GPyTorchPosterior = self.surrogate.posterior(X=X)
-        mean_flat: Tensor = posterior_X.mean.flatten()
-
-        gradients: Tensor = torch.abs(torch.autograd.grad(
-            outputs=mean_flat, 
-            inputs=X, 
-            grad_outputs=torch.ones_like(mean_flat), 
-            retain_graph=True
-        )[0])
-
-        L_i: Tensor = torch.max(torch.abs(gradients)) # i-constraint Lipschitz constant
-        ucb_i: Tensor = self.surrogate.get_ucb(X=X, beta=beta)
-
-        safety: Tensor = ucb_i - L_i * eucl_distances
-        masked: Tensor = safety.any(dim=1, keepdim=True)
+        masked: Tensor = self.get_constraint_mask(
+            eucl=eucl_distances,
+            constraints=constraints,
+        )
 
         maximized: Tensor = torch.where(masked, W, float("-inf"))
         return X[torch.argmax(maximized, dim=0)]
+
+    def get_constraint_mask(
+            self,
+            eucl: Tensor,
+            constraints: List[Tuple[Tensor, Tensor]],
+        ) -> Tensor:
+
+        constraint_mask: Tensor = torch.ones_like(
+            eucl, 
+            dtype=torch.bool, 
+            device=self.device
+            )
+        for (L_i, u_i) in constraints:
+            safety: Tensor = (u_i - L_i * eucl) >= 0.
+            constraint_mask: Tensor = constraint_mask & safety
+
+        return constraint_mask
 
     def select_next_candidate(
             self,

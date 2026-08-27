@@ -2,7 +2,7 @@
 import torch
 from torch import Tensor
 
-from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.util.s_typing import AllowUndefined
 from safebo_simpl.objective_functions._parent import ObjectiveFunction
 
 

@@ -3,7 +3,7 @@ import copy
 from typing import Any, List
 from dataclasses import dataclass, field
 
-from safebo_simpl.util.typing import AllowUndefined, _factory
+from safebo_simpl.util.s_typing import AllowUndefined, _factory
 from safebo_simpl.constraints import Constraint
 from safebo_simpl.util.continuity import NormTensor
 

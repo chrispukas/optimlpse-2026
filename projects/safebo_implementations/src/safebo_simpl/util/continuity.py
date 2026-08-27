@@ -1,7 +1,10 @@
-
-from dataclasses import dataclass
-from torch import Tensor
 import enum
+
+from typing import Any
+from dataclasses import dataclass
+
+import torch
+from torch import Tensor
 
 class StandardizationType(enum.Enum):
     Default = 0
@@ -33,8 +36,8 @@ class NormTensor():
                 self.mean: Tensor = X.mean(dim=0).unsqueeze(0)
                 self.std: Tensor = X.std(dim=0).unsqueeze(0)
             case StandardizationType.MinMax:
-                self.min: Tensor = X.min(dim=0)[0].unsqueeze(0)
-                self.max: Tensor = X.max(dim=0)[0].unsqueeze(0)
+                self.min: Tensor = X.min(dim=1)[0].unsqueeze(0)
+                self.max: Tensor = X.max(dim=1)[0].unsqueeze(0)
                 self.range: Tensor = self.max - self.min
             case _:
                 raise ValueError(f"Method: {method} is not valid.")
@@ -75,4 +78,3 @@ class NormTensor():
             method, 
             StandardizationType.Default
             )
-        

@@ -3,7 +3,7 @@ from typing import Tuple, Any, Callable, Generic
 from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
-from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.util.s_typing import AllowUndefined
 
 from safebo_simpl.objective_functions import ObjectiveFunction
 from safebo_simpl.util.continuity import NormTensor, StandardizationType
@@ -238,7 +238,7 @@ class SafeBOAlgorithm[
                 if X_candidates.ndim == 1:
                     X_candidates: Tensor = X_candidates.unsqueeze(0)
 
-                # X_norm -> | GP | -> Y_norm (Y_candidates)
+                # X_norm -> | GP | -> Y_norm -> Y_denorm (Y_candidates) (implicit transformation within the objective function wrapper)
                 Y_candidates: Tensor = self.objective_function(
                     X=X_candidates,
                 )
@@ -247,14 +247,13 @@ class SafeBOAlgorithm[
 
                 # (X_norm_test, Y_norm_test) -> | denormalization| -> (X_test, Y_test)
                 X_cand_denorm: Tensor = X_normalization_object.denormalize(X_candidates)
-                Y_cand_denorm: Tensor = Y_normalization_object.denormalize(Y_candidates)
 
             self.X: Tensor = torch.cat(
                 (self.X, X_cand_denorm),
                 dim=0,
             )
             self.Y: Tensor = torch.cat(
-                (self.Y, Y_cand_denorm),
+                (self.Y, Y_candidates),
                 dim=0,
             )
 

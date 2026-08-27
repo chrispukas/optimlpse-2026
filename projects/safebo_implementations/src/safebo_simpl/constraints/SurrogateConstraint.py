@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from safebo_simpl.util import generics, params
-from safebo_simpl.util import typing as su_typing
+from safebo_simpl.util import s_typing as su_typing
 from botorch import posteriors
 
 from safebo_simpl.constraints._parent import Constraint

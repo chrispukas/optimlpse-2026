@@ -1,6 +1,5 @@
 from typing import Any, Callable
 
-
 type AllowUndefined[T] = T | None
 type InitializerCallable[A, T] = AllowUndefined[Callable[[A], T]]
 

@@ -8,7 +8,7 @@ from safebo_simpl.objective_functions import ObjectiveFunction
 from safebo_simpl.util.params import BOParams
 from safebo_simpl.util.continuity import NormTensor
 from safebo_simpl.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
-from safebo_simpl.util.math import LipschitzConstraints
+from safebo_simpl.util.s_math import LipschitzConstraints
 
 import torch
 from torch import Tensor
@@ -25,10 +25,8 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             self,  
             X: Tensor, 
             Y: Tensor,
-
             dtype: torch.dtype,
             device: torch.device,
-
             state: BOParams,
             objective_function: ObjectiveFunction,
             ) -> None:
@@ -52,11 +50,10 @@ class GoOSE(su_safe.SafeBOAlgorithm):
 
     def forward(
             self,
-            X: Tensor,
+            X: Tensor, # In normalized space
             objective_function: ObjectiveFunction,
             **kwargs: Any
         ) -> Tensor:
-
         # Compute lipschitz constraints at the beginning of the loop (cached once for next computations)
         lipschitz: LipschitzConstraints = LipschitzConstraints(self.state.convergence.confidence_level)
         constraints: List[Tuple[Tensor, Tensor]] = lipschitz.get_constraint_list(X, self.state.constraints.constraints)
@@ -74,8 +71,7 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             if not isinstance(self.objective_function.x_normtensor, NormTensor):
                 raise ValueError("Normalization for x not set in the objective function!")
             if self.state.constraints.is_available():
-                if not self.state.constraints(X=self.objective_function.x_normtensor.denormalize(X=Z)):
-                    return penalty
+                return penalty
 
             optimistic: Tensor = self.get_optimistic_safe_subset(
                 Z=Z,

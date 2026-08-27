@@ -7,7 +7,7 @@ from safebo_simpl.util import params as su_prms
 from safebo_simpl.objective_functions import ObjectiveFunction
 from safebo_simpl.util.continuity import NormTensor
 
-from safebo_simpl.util.typing import AllowUndefined
+from safebo_simpl.util.s_typing import AllowUndefined
 
 import torch
 from torch import Tensor
@@ -195,11 +195,9 @@ class GPsTR(su_safe.SafeBOAlgorithm):
                 torch.linalg.norm(D, dim=1).item() > self.state.dynamics.delta_t: # Restricts to hypersphere
                 return penalty
 
-            XD: Tensor = self.center + D
-            if self.state.constraints.is_available():
-                constraint_mask: Tensor = self.state.constraints(X=XD)
-                if not constraint_mask.item():
-                    return penalty
+            XD: Tensor = self.clamp_X(self.center + D, bounds=self.objective_function.unit_bounds)
+            if not self.state.constraints.is_available():
+                return penalty
             
             lcb: Tensor = self.surrogate.get_lcb(XD, beta=self.state.convergence.confidence_level)
             return lcb.item()
@@ -213,7 +211,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             bounds=dt_bds,
             maxiter=50,
         )
-        next_candidates: Tensor = (self.center + d_candidate)
+        next_candidates: Tensor = self.clamp_X(self.center + d_candidate, bounds=self.objective_function.unit_bounds)
         return next_candidates.unsqueeze(0)
 
 
@@ -223,7 +221,7 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             x_prev: Tensor,
             delta_t: float,
         ) -> Tensor:
-        XD: Tensor = x_prev + D
+        XD: Tensor = self.clamp_X(x_prev + D, self.objective_function.unit_bounds) # Assuming X, and d is in unit hypercube [0, 1]^d
         lcb_XD: Tensor = self.surrogate.get_lcb(X=XD, beta=self.state.convergence.confidence_level).squeeze()
         eucl_mask: Tensor = (torch.linalg.norm(D, dim=1) <= delta_t)
 
@@ -272,3 +270,10 @@ class GPsTR(su_safe.SafeBOAlgorithm):
             return False, delta_t
         else:
             return True, min(delta_t * state_conv.gamma_inc, state_conv.delta_max)
+
+    def clamp_X(
+            self,
+            X: Tensor,
+            bounds: Tensor,
+    ) -> Tensor:
+        return torch.clamp(X, min=bounds[:, 0], max=bounds[:, 1])

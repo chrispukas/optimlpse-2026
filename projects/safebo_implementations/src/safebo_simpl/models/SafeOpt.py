@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 from safebo_simpl.util import generics as su_safe
 from safebo_simpl.util import params as su_prms
-from safebo_simpl.util.math import LipschitzConstraints
+from safebo_simpl.util.s_math import LipschitzConstraints
 
 from safebo_simpl.objective_functions import ObjectiveFunction
 from safebo_simpl.util.continuity import NormTensor

@@ -296,7 +296,6 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             best_f=float("inf"),
             n_evals=0,
             success=False,
-            elapsed=elapsed,
             metadata={**metadata, "reason": reason}
         )
 

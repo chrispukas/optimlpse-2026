@@ -203,6 +203,7 @@ class SafeBOAlgorithm[
             X: Tensor = self.X.detach()
             Y: Tensor = self.Y.detach()
 
+
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
                 Y_normalization_object: NormTensor = NormTensor(Y, method=StandardizationType.ZScore)

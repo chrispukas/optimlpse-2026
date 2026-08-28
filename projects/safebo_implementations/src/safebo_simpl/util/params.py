@@ -26,58 +26,11 @@ class BOParams_Constraints[
     T_Constraint: Constraint
     ]:
     constraints: AllowUndefined[List[T_Constraint]] = None
-
-    def __call__(
-            self, 
-            X: Tensor,
-
-            *args: Any, 
-            **kwds: Any
-        ) -> Any:
-        return self._get_constraints(
-            X=X
-        )
-        
+    
     def is_available(
             self,
         ) -> bool:
         return bool(self.constraints)
-
-    def _get_constraints(
-            self,
-            X: Tensor
-        ) -> Tensor:
-        DEFAULT: Tensor = torch.ones(X.shape[:-1], dtype=torch.bool, device=X.device)
-        if not self.constraints:
-            return copy.copy(DEFAULT)
-        mask: Tensor = copy.copy(DEFAULT)
-
-        for constraint in self.constraints:
-            mask: Tensor = mask & constraint(X=X)
-        return mask
-    
-    def refresh_constraints(
-            self,
-            X: Tensor
-        ) -> None:
-        if not self.constraints:
-            return
-
-        for constraint in self.constraints:
-            constraint.fit(X=X)
-    def _set_norms(
-                self,
-                X_normtensor: NormTensor,
-                Y_normtensor: NormTensor
-        ) -> None:
-        if not self.constraints:
-            return
-        
-        for constraint in self.constraints:
-            constraint._set_norms(
-                X_normtensor=X_normtensor,
-                Y_normtensor=Y_normtensor,
-            )
                 
 
 

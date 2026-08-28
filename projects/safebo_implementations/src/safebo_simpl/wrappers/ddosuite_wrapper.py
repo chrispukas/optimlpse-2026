@@ -12,7 +12,7 @@ import torch
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
-from ddo_suite.problems import BenchmarkProblem
+from ddo_suite.problems import BenchmarkProblem, ConstrainedProblem
 from ddo_suite.algorithms.base import (
     BudgetExhausted,
     OptimizationResult,
@@ -26,32 +26,42 @@ from safebo_simpl.util.generics import SafeBOAlgorithm
 from safebo_simpl.util.params import BOParams
 from safebo_simpl.util.s_typing import AllowUndefined
 from safebo_simpl.objective_functions import ObjectiveFunction
-from safebo_simpl.constraints import Constraint
+from safebo_simpl.constraints import Constraint, SurrogateConstraint
 from safebo_simpl.util.continuity import NormTensor, StandardizationType
 
 from botorch.exceptions import ModelFittingError
 
 
-class DDOSuite_ConstraintWrapper(Constraint):
+class DDOSuite_ConstraintWrapper[T_Params: BOParams](SurrogateConstraint):
     def __init__(
         self,
+        problem: ConstrainedProblem,
         f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]],
+        params: T_Params,
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        super().__init__(dtype=dtype, device=device)
+        super().__init__(dtype=dtype, device=device, state=params)
         self.f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]] = f_budgeted
-
-    def forward(self, X: Tensor, *args: Any, **kwargs: Any) -> Tensor: 
-        X_numpy: NDArray[np.float64] = X.detach().cpu().numpy()
-        evaluated_constraints: list[NDArray[np.float64]] = []
+        self.problem: ConstrainedProblem = problem
         
-        for xi in X_numpy:
-            _, constraints = self.f_budgeted(xi)
-            evaluated_constraints.append(constraints)
-        stacked_constraints: Tensor = torch.tensor(np.stack(evaluated_constraints), dtype=self.dtype, device=self.device).nan_to_num(0.)
-        return (stacked_constraints <= 0.).all(dim=-1) # generate bitmask
-    
+        self.bounds = torch.tensor(self.problem.bounds, dtype=self.dtype, device=self.device)
+        self.x_normtensor = NormTensor(X=self.bounds, method=StandardizationType.MinMax)
+
+    def evaluate_real(self, X: Tensor) -> Tensor:
+        evaluated_constraints: list[Tensor] = []
+        
+        for entry in X.detach().cpu().numpy():
+            _, constraints = self.f_budgeted(entry)
+            print("raw g:", constraints, "denorm x:", entry)
+            evaluated_constraints.append(torch.tensor(constraints, device=X.device, dtype=X.dtype))
+
+        return torch.stack(evaluated_constraints, dim=0)
+
+    def initial_safe_candidates(self, n_points: int) -> Tensor:
+        return torch.tensor(self.problem.safe_initial_design(n=n_points), dtype=self.dtype, device=self.device)
+
+
 class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
     def __init__(
         self,
@@ -65,10 +75,10 @@ class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
         self.f_budgeted: Callable[[NDArray[np.float64]], float] = f_budgeted
 
     def forward(self, X: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        X_numpy: NDArray[np.float64] = X.detach().cpu().numpy()
         evaluated_objectives: list[float] = []
+        X_denorm = NormTensor(X=self.bounds, method=StandardizationType.MinMax).denormalize(X)
         
-        for xi in X_numpy:
+        for xi in X_denorm.detach().cpu().numpy():
             f_evaluated: float = float(self.f_budgeted(xi))
             evaluated_objectives.append(f_evaluated)
             
@@ -159,13 +169,9 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
 
     @staticmethod
     def _reset_constraints(problem: BenchmarkProblem) -> None:
-        if not DDOSuite_AlgorithmWrapper._is_constrained(problem):
+        if not isinstance(problem, ConstrainedProblem):
             return
         problem.c_list.clear()
-
-    @staticmethod
-    def _is_constrained(problem: BenchmarkProblem) -> bool:
-        return hasattr(problem, "c_list") and isinstance(problem.c_list, list)
 
     @staticmethod
     def _set_params(params: T_Params, dim: int, constraint: AllowUndefined[DDOSuite_ConstraintWrapper]) -> None:
@@ -186,16 +192,29 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         return adapted_objective
 
     def _initialize_constraint(self, problem: BenchmarkProblem, max_evals: int) -> AllowUndefined[DDOSuite_ConstraintWrapper]:
-        if not self._is_constrained(problem=problem):
+        if not isinstance(problem, ConstrainedProblem):
             return None
 
         f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]] = make_constrained_callable(problem=problem, max_evals=max_evals)
         adapted_constraint: DDOSuite_ConstraintWrapper = DDOSuite_ConstraintWrapper(
+            problem=problem,
             f_budgeted=f_budgeted,
+            params=self.params,
             dtype=self.dtype,
             device=self.device,
         )
         return adapted_constraint
+
+    def _get_initial_candidates[T_BenchmarkProblem: BenchmarkProblem](self, batch_size: int, seed: int, bounds: Tensor, problem: BenchmarkProblem) -> Tensor:
+        if isinstance(problem, ConstrainedProblem):
+            constraint: DDOSuite_ConstraintWrapper = self.params.constraints.constraints[0]
+            X_denormalized: Tensor = constraint.initial_safe_candidates(batch_size)
+            x_normalization_object: NormTensor = NormTensor(X=bounds, method=StandardizationType.MinMax)
+            return x_normalization_object.normalize(X_denormalized)
+        else:
+            sobol: SobolEngine = SobolEngine(dimension=problem.n_x, scramble=True, seed=seed)
+            return sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device) # Returns a tensor between 0, and 1
+
 
     def _attempt_run(
             self,
@@ -206,21 +225,19 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             seed: int,
             ) -> OptimizationResult:
         try: 
-            sobol: SobolEngine = SobolEngine(dimension=problem.n_x, scramble=True, seed=seed)
-
             while (rem := budget_remaining(problem=problem, max_evals=max_evals)) > 0:
                 batch_size: int = self._get_remaining_samples(maximum=self.params.sampling.initial_candidates, remaining=rem)
+                
+                X: Tensor = self._get_initial_candidates(batch_size=batch_size, seed=seed, bounds=adapted_objective.bounds, problem=problem)
+                Y: Tensor = adapted_objective(X).unsqueeze(-1) # Returns the denormalized values of Y
 
                 adapted_objective.x_normtensor = NormTensor(
-                                    X=adapted_objective.bounds, 
-                                    method=StandardizationType.MinMax)
-                
-                X: Tensor = sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device) # Returns a tensor between 0, and 1
-                Y: Tensor = adapted_objective(X).unsqueeze(-1) # Returns the denormalized values of Y
+                    X=adapted_objective.bounds, 
+                    method=StandardizationType.MinMax)
 
                 # X_normalized -> X_denormalized -> f(x) -> Y_denormalized
                 self.algorithm: T_Algorithm = self.uninitialized_algorithm(
-                    X=adapted_objective.x_normtensor.denormalize(X),
+                    X=X,
                     Y=Y,
                     dtype=self.dtype,
                     device=self.device,

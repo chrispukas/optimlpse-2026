@@ -1,5 +1,6 @@
 
 from .GoOSE import GoOSE
+from .GoOSE_v2 import GoOSEV2
 from .GPsTR import (
     GPsTR, 
     BOParams_GPsTR, 

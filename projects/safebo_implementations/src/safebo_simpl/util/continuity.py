@@ -20,11 +20,7 @@ std_dict: dict[str, StandardizationType] = \
 
 @dataclass
 class NormTensor():
-    def __init__(
-            self,
-            X: Tensor,
-            method: StandardizationType | str
-        ) -> None:
+    def __init__(self, X: Tensor, method: StandardizationType | str) -> None:
         if not isinstance(method, (StandardizationType, str)):
             raise ValueError(f"Method type {type(method)} not recognized!")
         self.method: StandardizationType = self._conv_to_enum(method) if isinstance(method, str) else method 
@@ -42,10 +38,7 @@ class NormTensor():
             case _:
                 raise ValueError(f"Method: {method} is not valid.")
 
-    def normalize(
-            self,
-            X: Tensor,
-    ) -> Tensor:
+    def normalize(self, X: Tensor,) -> Tensor:
         match self.method:
             case StandardizationType.Default:
                 return X
@@ -56,10 +49,7 @@ class NormTensor():
             case _:
                 raise ValueError(f"Method {self.method} is not valid.")
     
-    def denormalize(
-            self,
-            X: Tensor,
-    ) -> Tensor:
+    def denormalize(self, X: Tensor,) -> Tensor:
         match self.method:
             case StandardizationType.Default:
                 return X
@@ -70,11 +60,5 @@ class NormTensor():
             case _:
                 raise ValueError(f"Method {self.method} is not valid.")
     
-    def _conv_to_enum(
-            self,
-            method: str
-    ) -> StandardizationType:
-        return std_dict.get(
-            method, 
-            StandardizationType.Default
-            )
+    def _conv_to_enum(self, method: str) -> StandardizationType:
+        return std_dict.get(method, StandardizationType.Default)

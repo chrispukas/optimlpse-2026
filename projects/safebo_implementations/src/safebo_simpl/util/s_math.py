@@ -25,19 +25,14 @@ class LipschitzConstraints():
             return 
         return (
             self.get_ith_lipscitz_constraint(X=X, surrogate_constraint=surrogate_constraint), 
-            self.get_ith_lcb(X=X, conf_level=self.conf_level, surrogate_constraint=surrogate_constraint),
+            self.get_ith_ucb(X=X, conf_level=self.conf_level, surrogate_constraint=surrogate_constraint),
             )
 
-    def get_ith_lipscitz_constraint(
-        self,
-        X: Tensor,
-        surrogate_constraint: SurrogateConstraint
-    ) -> Tensor:
-
+    def get_ith_lipscitz_constraint(self, X: Tensor, surrogate_constraint: SurrogateConstraint) -> Tensor:
         with torch.enable_grad():
             X_grad: Tensor = X.clone().detach().requires_grad_(True)
 
-            mean: Tensor = surrogate_constraint.surrogate.posterior(X=X_grad).mean.flatten()
+            mean: Tensor = surrogate_constraint.get_mean(X=X_grad).flatten()
             gradients: Tensor = torch.linalg.norm(
                 torch.autograd.grad(
                     outputs=mean,
@@ -49,10 +44,6 @@ class LipschitzConstraints():
             )
             L_i: Tensor = torch.amax(gradients)
         return L_i.detach()
-    def get_ith_lcb(
-            self,
-            X: Tensor,
-            conf_level: float,
-            surrogate_constraint: SurrogateConstraint
-            ) -> Tensor:
-        return surrogate_constraint.surrogate.get_ucb(X=X, beta=conf_level)
+    
+    def get_ith_ucb(self, X: Tensor, conf_level: float, surrogate_constraint: SurrogateConstraint) -> Tensor:
+        return surrogate_constraint.get_ucb(X=X, beta=conf_level)

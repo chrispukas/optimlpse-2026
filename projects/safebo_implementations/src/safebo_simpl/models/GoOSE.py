@@ -38,7 +38,6 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             state=state,
             objective_function=objective_function
             )
-        self.bounds: npt.NDArray[np.float32] = np.array([[0.0, 1.0] for _ in range(self.state.data.dimensions)], dtype=np.float32)
 
     def train(
             self
@@ -85,9 +84,11 @@ class GoOSE(su_safe.SafeBOAlgorithm):
             return lcb.item()
 
         z_candidates: Tensor = self.de_sampler(
-            n=self.state.sampling.batch_size,
+            de_samples_per_loop=8,
+            batch_size=self.state.sampling.batch_size,
             acq_func=acqf_wrapper,
-            bounds=self.bounds,
+            bounds=self.unit_bounds,
+            vectorized=False
         )
         optimistic: Tensor = self.get_optimistic_safe_subset(
             Z=z_candidates,

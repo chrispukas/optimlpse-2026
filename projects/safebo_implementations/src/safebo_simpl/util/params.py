@@ -75,3 +75,5 @@ class BOParams[
         self.constraints: T_BOParams_Constraints = _factory(constraints)
         self.data:        T_BOParams_Data =        _factory(data)
         self.dynamics:    T_BOParams_Dynamics =    _factory(dynamics)
+    def reset(self) -> None:
+        self.constraints.constraints = []

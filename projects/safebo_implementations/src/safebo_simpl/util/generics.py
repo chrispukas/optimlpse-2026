@@ -100,7 +100,6 @@ class Surrogate[
         if properties is None:
             raise ValueError("Unable to extract properties from the posterior to calculate the lcb!")
         (mean, std) = properties
-        print(f"X shape: {X.shape} | Mean min/max: {mean.min().item():.4f}, {mean.max().item():.4f} | Std min/max: {std.min().item():.4f}, {std.max().item():.4f}")
         return mean - beta * std
 
 class SafeBOAlgorithm[
@@ -109,8 +108,8 @@ class SafeBOAlgorithm[
     def __init__(self, X: Tensor, Y: Tensor, dtype: torch.dtype, device: torch.device, 
                  state: T_BOParams, objective_function: ObjectiveFunction, *args: Any, **kwargs: Any,) -> None:
         super().__init__()
-        self.X: Tensor = X
-        self.Y: Tensor = Y
+        self.X: Tensor = X # Denormalized X
+        self.Y: Tensor = Y # Denormalized Y
 
         self.dtype: torch.dtype = dtype
         self.device: torch.device = device
@@ -119,56 +118,49 @@ class SafeBOAlgorithm[
         self.objective_function: ObjectiveFunction = objective_function
         self.surrogate: Surrogate = Surrogate(dtype=dtype, device=device, X=X, Y=Y, state=state,)
 
-        self.unit_bounds: npt.NDArray[np.float32] = np.array([[0.0, 1.0] for _ in range(self.state.data.dimensions)], dtype=np.float32)
+        self.unit_bounds: Tensor = torch.tensor([[0.0, 1.0] for _ in range(self.state.data.dimensions)], dtype=self.dtype, device=self.device)
 
     def _train[T_Constraint: Constraint](self, single_pass: Callable[[Tensor, ObjectiveFunction], AllowUndefined[Tensor]], metrics: bool = False,) -> None:
 
         constraints: list[T_Constraint] = self.state.constraints.constraints or []
         X_normalization_object: NormTensor = NormTensor(self.objective_function.bounds, method=StandardizationType.MinMax)
 
-        for constraint in constraints:
-            if not isinstance(constraint, SurrogateConstraint):
-                continue
-            constraint.fit_all(X=X_normalization_object.denormalize(self.X), bounds=self.objective_function.bounds,)
         for _ in range(self.state.dynamics.max_iterations):
 
-            X: Tensor = self.X.detach()
-            Y: Tensor = self.Y.detach()
+            X_denormalized: Tensor = self.X.detach() # Denormalized X
+            Y_denormalized: Tensor = self.Y.detach() # Denormalized Y
 
             with gpytorch.settings.max_cholesky_size(self.state.convergence.max_cholesky_size):
 
-                Y_normalization_object: NormTensor = NormTensor(Y, method=StandardizationType.ZScore)
+                Y_normalization_object: NormTensor = NormTensor(Y_denormalized, method=StandardizationType.ZScore)
 
                 # Normalize X, and Y here, provide this information to the objective function.
-                X_normalized_train: Tensor = X_normalization_object.normalize(X)
-                Y_normalized_train: Tensor = Y_normalization_object.normalize(Y)
+                X_normalized: Tensor = X_normalization_object.normalize(X_denormalized)
+                Y_normalized: Tensor = Y_normalization_object.normalize(Y_denormalized)
 
                 self.objective_function._set_norms(X_normtensor=X_normalization_object, Y_normtensor=Y_normalization_object)
-                self.surrogate.refresh_surrogate(X=X_normalized_train, Y=Y_normalized_train)
+                self.surrogate.refresh_surrogate(X=X_normalized, Y=Y_normalized) # Train the surrogate model on the normalized inputs, and outputs
+
+                for constraint in constraints:
+                    if not isinstance(constraint, SurrogateConstraint): continue
+                    constraint.fit_append(X=X_denormalized, bounds=self.objective_function.bounds)
 
                 # X_normalized_train -> | GP | -> Y_normalized_train, the GP is trained on the normalized/standardized data            
-                X_normalized_candidates: AllowUndefined[Tensor] = single_pass(X_normalized_train, self.objective_function)
-
-                if not isinstance(X_normalized_candidates, Tensor): continue
+                unsafe_X_normalized_candidates: Tensor | None = single_pass(X_normalized, self.objective_function)
+                if not isinstance(unsafe_X_normalized_candidates, Tensor): continue
+                X_normalized_candidates: Tensor = self.sanitize_tensors(unsafe_X_normalized_candidates)
 
                 # X_norm -> | GP | -> Y_norm -> Y_denorm (Y_candidates) (implicit transformation within the objective function wrapper)
-                X_candidates: Tensor = X_normalized_candidates.unsqueeze(0) if X_normalized_candidates.ndim == 1 else X_normalized_candidates
-                Y_candidates: Tensor = self.objective_function(X=X_candidates,)
-                Y_candidates: Tensor = Y_candidates.unsqueeze(-1) if Y_candidates.ndim == 1 else Y_candidates
+                Y_denormalized_candidates: Tensor = self.sanitize_tensors(self.objective_function(X=X_normalized_candidates,))
 
                 # (X_norm_test, Y_norm_test) -> | denormalization| -> (X_test, Y_test)
-                X_cand_denorm: Tensor = X_normalization_object.denormalize(X_candidates)
+                X_denormalized_candidates: Tensor = X_normalization_object.denormalize(X_normalized_candidates)
 
-            for constraint in constraints:
-                if not isinstance(constraint, SurrogateConstraint):
-                    continue
-                constraint.fit_append(X=X_cand_denorm, bounds=self.objective_function.bounds)
-
-            self.X: Tensor = torch.cat((self.X, X_candidates), dim=0,)
-            self.Y: Tensor = torch.cat((self.Y, Y_candidates), dim=0,)
+            self.X: Tensor = torch.cat((self.X, X_denormalized_candidates), dim=0,)
+            self.Y: Tensor = torch.cat((self.Y, Y_denormalized_candidates), dim=0,)
 
             if metrics:
-                print(f"Minimum y-value: {torch.amin(self.X)}, Maximum y-value: {torch.amax(self.X)}, Latest: {Y_candidates}")
+                print(f"Minimum y-value: {torch.amin(self.X)}, Maximum y-value: {torch.amax(self.X)}, Latest: {Y_denormalized_candidates}")
 
     def train(
             self,
@@ -186,9 +178,9 @@ class SafeBOAlgorithm[
             de_samples_per_loop: int,
             batch_size: int,
             acq_func: Callable[[Tensor], Tensor],
-            bounds: npt.NDArray[np.float32],
-            maxiter: int = 50,
-            strategy: str = "rand2bin",
+            bounds: Tensor,
+            maxiter: int = 1000,
+            strategy: str = "best1bin",
             vectorized: bool = True,
             candidates: AllowUndefined[torch.Tensor] = None
             ):
@@ -212,9 +204,8 @@ class SafeBOAlgorithm[
 
         init: str | npt.NDArray[np.float64] = "latinhypercube" if not isinstance(candidates, Tensor) else candidates.detach().cpu().numpy()
 
-        _: npt.NDArray[np.float32] = differential_evolution(func=wrapper, bounds=self.sanitize_bounds(bounds), popsize=de_samples_per_loop, maxiter=maxiter, 
-                                                                 strategy=strategy, vectorized=vectorized, updating="deferred", polish=False, mutation=(0.5, 1.0), 
-                                                                 init=init).x
+        _: npt.NDArray[np.float32] = differential_evolution(func=wrapper, bounds=self.sanitize_bounds(bounds.detach().cpu().numpy()), popsize=de_samples_per_loop, maxiter=maxiter, 
+                                                                 strategy=strategy, vectorized=vectorized, updating="deferred", polish=False, mutation=(0.5, 1.0)).x
     
         k_elements = min(batch_size, curr_loss.numel())
         _, idx = torch.topk(curr_loss.flatten(), k=k_elements, largest=False)
@@ -232,6 +223,9 @@ class SafeBOAlgorithm[
             neginf=-limit
         )
 
+    @staticmethod
+    def sanitize_tensors(X: Tensor) -> Tensor:
+        return X.unsqueeze(0) if X.ndim == 1 else X
 @dataclass
 class PosteriorState():
     posterior: bp_gpytorch.GPyTorchPosterior | None = None

@@ -39,6 +39,9 @@ class ObjectiveFunction():
             self,
             X: Tensor,
     ) -> Tensor:
+        """
+            Accepts a normalized X value, returns a denormalized Y value.
+        """
         x: Tensor = X.to(device=self.device, dtype=self.dtype)
         if not self._check_in_bounds(X=x, bounds=self.unit_bounds):
             raise ValueError(f"Input {x} provided is outside of the specified bounds: {self.unit_bounds}!")
@@ -48,9 +51,9 @@ class ObjectiveFunction():
             raise ValueError(f"Expected last dimension to be of size ({self.dim}), got ({X.shape[-1]})")
 
         x_denorm: Tensor = self.x_normtensor.denormalize(x) if isinstance(self.x_normtensor, NormTensor) else X
-        y_norm: Tensor = self.forward(X=x_denorm)
+        y_denorm: Tensor = self.forward(X=x_denorm) # Y denormalized
 
-        return -y_norm if self.negate else y_norm
+        return -y_denorm if self.negate else y_denorm
 
     def _set_norms(
             self,

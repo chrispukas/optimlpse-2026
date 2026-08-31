@@ -76,7 +76,6 @@ class SurrogateConstraint[T_BOParams: params.BOParams](Constraint):
         Y_normalized: Tensor = self.y_normalization_object.normalize(self.Y)
 
         if isinstance(self.surrogate, generics.Surrogate):
-            print("REFRESHING")
             self.surrogate.refresh_surrogate(X=X_normalized, Y=Y_normalized)
             return
         self.surrogate: AllowUndefined[generics.Surrogate] = generics.Surrogate(self.dtype, self.device, X_normalized, Y_normalized, self.state)

@@ -53,10 +53,9 @@ class DDOSuite_ConstraintWrapper[T_Params: BOParams](SurrogateConstraint):
         
         for entry in X.detach().cpu().numpy():
             _, constraints = self.f_budgeted(entry)
-            print("raw g:", constraints, "denorm x:", entry)
             evaluated_constraints.append(torch.tensor(constraints, device=X.device, dtype=X.dtype))
 
-        return torch.stack(evaluated_constraints, dim=0)
+        return -torch.stack(evaluated_constraints, dim=0)
 
     def initial_safe_candidates(self, n_points: int) -> Tensor:
         return torch.tensor(self.problem.safe_initial_design(n=n_points), dtype=self.dtype, device=self.device)
@@ -76,9 +75,7 @@ class DDOSuite_ObjectiveWrapper(ObjectiveFunction):
 
     def forward(self, X: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         evaluated_objectives: list[float] = []
-        X_denorm = NormTensor(X=self.bounds, method=StandardizationType.MinMax).denormalize(X)
-        
-        for xi in X_denorm.detach().cpu().numpy():
+        for xi in X.detach().cpu().numpy():
             f_evaluated: float = float(self.f_budgeted(xi))
             evaluated_objectives.append(f_evaluated)
             
@@ -123,8 +120,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         (_rgen, seed) = self._set_seed(seed=(problem.seed if rng_seed is None else rng_seed))
 
         # Initialize constraints, and objective functions from the wrappers
-        adapted_objective_function: DDOSuite_ObjectiveWrapper = self._initialize_objective(problem=problem, max_evals=max_evals)
-        adapted_constraint_function: AllowUndefined[DDOSuite_ConstraintWrapper] = self._initialize_constraint(problem=problem, max_evals=max_evals)
+        (adapted_objective_function, adapted_constraint_function) = self._initialize_funcs(params=self.params, problem=problem, max_evals=max_evals)
         self._set_params(params=self.params, dim=problem.n_x, constraint=adapted_constraint_function)
 
         # Initialize states, and a default result object
@@ -179,6 +175,14 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         constraint_list: list[DDOSuite_ConstraintWrapper] = [constraint] if constraint else []
         params.constraints.constraints = (params.constraints.constraints or []) + constraint_list # type: ignore
 
+    def _initialize_funcs(self, params: T_Params, problem: BenchmarkProblem, max_evals: int) -> tuple[DDOSuite_ObjectiveWrapper, DDOSuite_ConstraintWrapper | None]:
+        problem.reset()
+        params.reset()
+
+        objective: DDOSuite_ObjectiveWrapper = self._initialize_objective(problem=problem, max_evals=max_evals)
+        constraint: DDOSuite_ConstraintWrapper | None = self._initialize_constraint(problem=problem, max_evals=max_evals)
+        return (objective, constraint)
+
     def _initialize_objective(self, problem: BenchmarkProblem, max_evals: int) -> DDOSuite_ObjectiveWrapper:
         f_budgeted: Callable[[NDArray[np.float64]], float] = make_budgeted_callable(problem, max_evals)
         adapted_objective: DDOSuite_ObjectiveWrapper = DDOSuite_ObjectiveWrapper(
@@ -189,6 +193,7 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             maximize=self.maximize_objective
         )
         adapted_objective.bounds = torch.tensor(problem.bounds, dtype=self.dtype, device=self.device)
+        adapted_objective.x_normtensor = NormTensor(X=adapted_objective.bounds, method=StandardizationType.MinMax)
         return adapted_objective
 
     def _initialize_constraint(self, problem: BenchmarkProblem, max_evals: int) -> AllowUndefined[DDOSuite_ConstraintWrapper]:
@@ -208,13 +213,13 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
     def _get_initial_candidates[T_BenchmarkProblem: BenchmarkProblem](self, batch_size: int, seed: int, bounds: Tensor, problem: BenchmarkProblem) -> Tensor:
         if isinstance(problem, ConstrainedProblem):
             constraint: DDOSuite_ConstraintWrapper = self.params.constraints.constraints[0]
-            X_denormalized: Tensor = constraint.initial_safe_candidates(batch_size)
-            x_normalization_object: NormTensor = NormTensor(X=bounds, method=StandardizationType.MinMax)
-            return x_normalization_object.normalize(X_denormalized)
+            X_denormalized: Tensor = constraint.initial_safe_candidates(batch_size) # Returns X_denormalized
+            x_normalization_object: NormTensor = NormTensor(X=bounds, method=StandardizationType.MinMax) 
+            return x_normalization_object.normalize(X_denormalized) # X_denormalized -> X_normalized
         else:
             sobol: SobolEngine = SobolEngine(dimension=problem.n_x, scramble=True, seed=seed)
-            return sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device) # Returns a tensor between 0, and 1
-
+            X_normalized: Tensor = sobol.draw(n=batch_size).to(dtype=self.dtype, device=self.device) # Returns a tensor between 0, and 1
+            return X_normalized
 
     def _attempt_run(
             self,
@@ -226,19 +231,18 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
             ) -> OptimizationResult:
         try: 
             while (rem := budget_remaining(problem=problem, max_evals=max_evals)) > 0:
+                assert adapted_objective.x_normtensor
+
                 batch_size: int = self._get_remaining_samples(maximum=self.params.sampling.initial_candidates, remaining=rem)
-                
-                X: Tensor = self._get_initial_candidates(batch_size=batch_size, seed=seed, bounds=adapted_objective.bounds, problem=problem)
-                Y: Tensor = adapted_objective(X).unsqueeze(-1) # Returns the denormalized values of Y
 
-                adapted_objective.x_normtensor = NormTensor(
-                    X=adapted_objective.bounds, 
-                    method=StandardizationType.MinMax)
+                # X is normalized
+                X_normalized: Tensor = self._get_initial_candidates(batch_size=batch_size, seed=seed, bounds=adapted_objective.bounds, problem=problem)
+                Y_denormalized: Tensor = adapted_objective(X_normalized).unsqueeze(-1) # X_normalized -> Y_denormalized
 
-                # X_normalized -> X_denormalized -> f(x) -> Y_denormalized
+                # X_normalized -> X_denormalized, Y_denormalized -> f(x) -> GP_trained
                 self.algorithm: T_Algorithm = self.uninitialized_algorithm(
-                    X=X,
-                    Y=Y,
+                    X=adapted_objective.x_normtensor.denormalize(X_normalized),
+                    Y=Y_denormalized,
                     dtype=self.dtype,
                     device=self.device,
                     state=self.params,

@@ -179,8 +179,8 @@ class SafeBOAlgorithm[
             batch_size: int,
             acq_func: Callable[[Tensor], Tensor],
             bounds: Tensor,
-            maxiter: int = 1000,
-            strategy: str = "best1bin",
+            maxiter: int = 10000,
+            strategy: str = "rand2bin",
             vectorized: bool = True,
             candidates: AllowUndefined[torch.Tensor] = None
             ):

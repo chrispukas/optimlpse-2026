@@ -32,7 +32,6 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
         super()._train(single_pass=self.forward, metrics=False)
 
     # Room for improvement:
-    # - Convex hull algorithms to find safe bounds of X to speed up differential evolution candidate selection
     # - Use rolling computed objective value to identify if the uncertainty sufficient to select a given candidate for d.e.
 
     def forward[T_Constraint: Constraint](self, X: Tensor, *args: Any, **kwargs: Any) -> Tensor:
@@ -41,8 +40,8 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
         penalty_magnitude: float = 1. # flatten the penalty space
-        penalty_margin: float = 4.
-        penalty_offset: Tensor = self.surrogate.get_lcb(X, conf_level).max()
+        penalty_margin: float = 1.
+        penalty_offset: float = self.surrogate.get_lcb(X, conf_level).max().item()
 
         def x_de_reward_function(
                 X_de: Tensor,
@@ -51,15 +50,17 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
             objective_uncertainty_mask: Tensor = self.objective_uncertainty_mask(X_de, conf_level=conf_level)
             
             # smooth penalty mask to guarantee that the x candidate is safe
-            (safety_penalty_mask, safety_bitmask) = self.constraint_safe_mask(X_de, conf_level=conf_level, constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
+            (safety_penalty_mask, safety_bitmask) = self.constraint_safe_mask(X_de, conf_level=conf_level, 
+                                                                    constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
 
             # smooth reward mask to fill in the safe regions
             reward_mask: Tensor = self.surrogate.get_lcb(X_de, conf_level).squeeze(-1) #argmin the lcb
-            return torch.where(safety_bitmask, reward_mask, safety_penalty_mask + penalty_offset + penalty_margin) - objective_uncertainty_mask
+            final: Tensor = torch.where(safety_bitmask, reward_mask, safety_penalty_mask + penalty_offset + penalty_margin) - objective_uncertainty_mask
+            return final
 
-        rough_convexhull: Tensor = self.rough_convex_bounds(X)
+        hypercube_bounds: Tensor = self.hypercube_bounds(X)
         X_proposed: Tensor = self.de_sampler(de_samples_per_loop=8, batch_size=batch_size, 
-                                             acq_func=x_de_reward_function, bounds=rough_convexhull, vectorized=True,) # (N, dim)
+                                             acq_func=x_de_reward_function, bounds=hypercube_bounds, vectorized=True,) # (N, dim)
 
         # Compute lipschitz constraints at the beginning of the loop (cached once for next computations)
         lipschitz_object: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level)
@@ -72,10 +73,12 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
             objective_uncertainty_mask: Tensor = self.objective_uncertainty_mask(Z, conf_level=conf_level, penalty_magnitude=penalty_magnitude) #(N, dim_z) D \ S_t
 
             # smooth penalty mask to check if Z lies outside the confidence region of the constraint surrogate (this suggests a safe set (?))
-            (constraint_uncertainty_mask, uncertainty_bitmask) = self.constraint_uncertainty_mask(Z, conf_level=conf_level, constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
+            (constraint_uncertainty_mask, uncertainty_bitmask) = self.constraint_uncertainty_mask(Z, conf_level=conf_level, 
+                                                                    constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
 
             # smooth penalty mask to enforce function smoothness
-            lipschitz_penalty_mask: Tensor = self.get_lipschitz_bitmask(X=X_proposed, Z=Z, constraints=lipschitz_constraints, penalty_magnitude=penalty_magnitude) # (N_z, )
+            lipschitz_penalty_mask: Tensor = self.get_lipschitz_bitmask(X=X_proposed, Z=Z, 
+                                                                    constraints=lipschitz_constraints, penalty_magnitude=penalty_magnitude) # (N_z, )
 
             final: Tensor = constraint_uncertainty_mask + lipschitz_penalty_mask
             # smooth reward mask to fill in the safe regions
@@ -87,7 +90,7 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
                                              acq_func=z_de_reward_function, bounds=self.unit_bounds, vectorized=True,) # (N, dim)
 
         global ran
-        if not ran and X.shape[1] == 2:
+        if False and not ran and X.shape[1] == 2:
             #ran = True
             plot_reward_planes_side_by_side(
                 reward_function_1=x_de_reward_function,
@@ -97,32 +100,25 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
                 device=self.device
             )
 
-        X_proposed: Tensor = self.enforce_safety(X_proposed, conf_level=conf_level, constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
-        Z_proposed: Tensor = self.enforce_safety(Z_proposed, conf_level=conf_level, constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
-        
-        X_min_idx = torch.argmin(x_de_reward_function(X_proposed))
-        Z_min_idx = torch.argmin(z_de_reward_function(Z_proposed))
+        X_proposed_safe: Tensor = self.enforce_safety(X_proposed, conf_level, constraint_objects=constraint_objects, penalty_magnitude=penalty_magnitude)
+        if X_proposed_safe.shape[0] == 0:
+            X_proposed_safe: Tensor = X # Fallback to the known safe candidate set
 
-        X_min = X_proposed[X_min_idx]
-        Z_min = Z_proposed[Z_min_idx]
+        X_min: Tensor = self._argmin_rewards(X_proposed_safe, x_de_reward_function)
+        Z_min: Tensor = self._argmin_rewards(Z_proposed, z_de_reward_function)
 
         true_X_lcb = self.surrogate.get_lcb(X_min.unsqueeze(0), conf_level).squeeze(-1)
         true_Z_lcb = self.surrogate.get_lcb(Z_min.unsqueeze(0), conf_level).squeeze(-1)
 
-        if not X_proposed or not Z_proposed:
-            return X[-1, :]
-
         if true_X_lcb < true_Z_lcb:
-            return Z_min
-
-        dist = torch.cdist(x1=X_proposed, x2=Z_min.unsqueeze(0)).squeeze(-1)        
-        _, safe_X_mask = self.constraint_safe_mask(X_proposed, conf_level, constraint_objects, penalty_magnitude=1.0)
-        dist[~safe_X_mask] = float("inf")
-        
-        if torch.isinf(dist).all():
             return X_min
 
-        return X_proposed[torch.argmin(dist, dim=0)]
+        X_dist: Tensor = self.dist_selection(X=X_proposed_safe, Z=Z_min)
+        return X_dist
+
+    @staticmethod
+    def _argmin_rewards(X: Tensor, reward_method: Callable[[Tensor], Tensor]) -> Tensor:
+        return X[torch.argmin(reward_method(X))]
 
     @staticmethod
     def _default_penalty_mask(X: Tensor) -> Tensor:
@@ -143,7 +139,7 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
 
         lcb: Tensor = self.surrogate.get_lcb(X=X, beta=conf_level).squeeze(-1) # (N_z, )
         ucb: Tensor = self.surrogate.get_ucb(X=X, beta=conf_level).squeeze(-1) # (N_z, )
-        violation: Tensor = torch.clamp(-(ucb-lcb), 1e-6)
+        violation: Tensor = torch.clamp(0. - (ucb-lcb), 0.)
 
         penalty_mask: Tensor = torch.maximum(penalty_mask, violation)
         
@@ -164,7 +160,7 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
             bitmask &= this_bitmask
 
             violation: Tensor = torch.where(~this_bitmask, -lcb, torch.zeros_like(lcb)) # Guarantees safety
-            penalty_mask: Tensor = torch.maximum(penalty_mask, violation)
+            penalty_mask: Tensor = torch.maximum(penalty_mask, violation) # stack on violations to ensure that any non-0 region becomes invalid
 
         return (self._validate_result((penalty_mask) * penalty_magnitude), bitmask)
 
@@ -172,7 +168,7 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
         pessimistic_penalty_mask: Tensor = self._default_penalty_mask(X=X)
         optimistic_penalty_mask: Tensor = torch.clone(pessimistic_penalty_mask)
 
-        single_uncertain: Tensor = self._default_bitmask(X, False)
+        single_uncertain: Tensor = self._default_bitmask(X, True)
 
         for constraint_surrogate in constraint_objects:
             if not isinstance(constraint_surrogate, SurrogateConstraint):
@@ -191,7 +187,7 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
 
         return (self._validate_result((pessimistic_penalty_mask + optimistic_penalty_mask) * penalty_magnitude), single_uncertain)
 
-    def get_lipschitz_bitmask(self, X: Tensor, Z: Tensor, constraints: list[tuple[Tensor, Tensor]], penalty_magnitude: float = 1.0) -> Tensor:
+    def get_lipschitz_bitmask(self, X: Tensor, Z: Tensor, constraints: list[tuple[Tensor, Tensor]], penalty_magnitude: float = 1.) -> Tensor:
         penalty_mask: Tensor = self._default_penalty_mask(Z) # (N_z, )
         eucl_distance: Tensor = torch.cdist(x1=X, x2=Z) # (N_x, N_z)
 
@@ -202,13 +198,13 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
             penalty_mask: Tensor = torch.maximum(penalty_mask, violation)
         return penalty_mask * penalty_magnitude
 
-    def rough_convex_bounds(self, X: Tensor, padding: float = 1.) -> Tensor:
+    def hypercube_bounds(self, X: Tensor, padding: float = 1.) -> Tensor:
         min_bounds: Tensor = torch.clamp(torch.amin(X, dim=0) - padding, 0.0, 1.0)
         max_bounds: Tensor = torch.clamp(torch.amax(X, dim=0) + padding, 0.0, 1.0)
 
         return torch.permute(torch.vstack((min_bounds, max_bounds)), (1, 0))
 
-    def enforce_safety[T_Constraint: Constraint](self, X: Tensor, conf_level: float, constraint_objects: list[T_Constraint], penalty_magnitude: float) -> Tensor:
+    def enforce_safety[T_Constraint: Constraint](self, X: Tensor,  conf_level: float, constraint_objects: list[T_Constraint], penalty_magnitude: float) -> Tensor:
         (_, bitmask) = self.constraint_safe_mask(
                     X, 
                     conf_level=conf_level, 
@@ -216,6 +212,10 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
                     penalty_magnitude=penalty_magnitude
                 )
         return X[bitmask]
+
+    def dist_selection(self, X: Tensor, Z: Tensor) -> Tensor:
+        dist: Tensor = torch.cdist(x1=X, x2=Z.unsqueeze(0)).squeeze()   
+        return X[torch.argmin(dist, dim=0)]
 
 
 

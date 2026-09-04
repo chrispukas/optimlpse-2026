@@ -38,8 +38,9 @@ class DDOSuite_ConstraintWrapper[T_Params: BOParams](SurrogateConstraint):
         problem: ConstrainedProblem,
         f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]],
         params: T_Params,
-        dtype: torch.dtype,
-        device: torch.device,
+        constraint_idx: int = 0,
+        dtype: torch.dtype = torch.float64,
+        device: torch.device = torch.device("cpu"),
     ) -> None:
         super().__init__(dtype=dtype, device=device, state=params)
         self.f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]] = f_budgeted
@@ -48,15 +49,17 @@ class DDOSuite_ConstraintWrapper[T_Params: BOParams](SurrogateConstraint):
         self.bounds = torch.tensor(self.problem.bounds, dtype=self.dtype, device=self.device)
         self.x_normtensor = NormTensor(X=self.bounds, method=StandardizationType.MinMax)
 
+        self.constraint_idx = constraint_idx
+
     def evaluate_real(self, X: Tensor) -> Tensor:
         evaluated_constraints: list[Tensor] = []
         
         for entry in X.detach().cpu().numpy():
             _, constraints = self.f_budgeted(entry)
-            evaluated_constraints.append(torch.tensor(constraints, device=X.device, dtype=X.dtype))
+            evaluated_constraints.append(torch.tensor(constraints[self.constraint_idx], device=X.device, dtype=X.dtype))
 
-        return -torch.stack(evaluated_constraints, dim=0)
-
+        return -torch.stack(evaluated_constraints, dim=0).unsqueeze(-1)
+    
     def initial_safe_candidates(self, n_points: int) -> Tensor:
         return torch.tensor(self.problem.safe_initial_design(n=n_points), dtype=self.dtype, device=self.device)
 
@@ -120,8 +123,8 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         (_rgen, seed) = self._set_seed(seed=(problem.seed if rng_seed is None else rng_seed))
 
         # Initialize constraints, and objective functions from the wrappers
-        (adapted_objective_function, adapted_constraint_function) = self._initialize_funcs(params=self.params, problem=problem, max_evals=max_evals)
-        self._set_params(params=self.params, dim=problem.n_x, constraint=adapted_constraint_function)
+        (adapted_objective_function, adapted_constraint_functions) = self._initialize_funcs(params=self.params, problem=problem, max_evals=max_evals)
+        self._set_params(params=self.params, dim=problem.n_x, constraint=adapted_constraint_functions)
 
         # Initialize states, and a default result object
         state: ModelState = ModelState()
@@ -170,18 +173,18 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         problem.c_list.clear()
 
     @staticmethod
-    def _set_params(params: T_Params, dim: int, constraint: AllowUndefined[DDOSuite_ConstraintWrapper]) -> None:
+    def _set_params(params: T_Params, dim: int, constraint: AllowUndefined[list[DDOSuite_ConstraintWrapper]]) -> None:
         params.data.dimensions = dim
-        constraint_list: list[DDOSuite_ConstraintWrapper] = [constraint] if constraint else []
+        constraint_list: list[DDOSuite_ConstraintWrapper] = constraint if constraint else []
         params.constraints.constraints = (params.constraints.constraints or []) + constraint_list # type: ignore
 
-    def _initialize_funcs(self, params: T_Params, problem: BenchmarkProblem, max_evals: int) -> tuple[DDOSuite_ObjectiveWrapper, DDOSuite_ConstraintWrapper | None]:
+    def _initialize_funcs(self, params: T_Params, problem: BenchmarkProblem, max_evals: int) -> tuple[DDOSuite_ObjectiveWrapper, list[DDOSuite_ConstraintWrapper] | None]:
         problem.reset()
         params.reset()
 
         objective: DDOSuite_ObjectiveWrapper = self._initialize_objective(problem=problem, max_evals=max_evals)
-        constraint: DDOSuite_ConstraintWrapper | None = self._initialize_constraint(problem=problem, max_evals=max_evals)
-        return (objective, constraint)
+        constraints: list[DDOSuite_ConstraintWrapper] | None = self._initialize_constraint(problem=problem, max_evals=max_evals)
+        return (objective, constraints)
 
     def _initialize_objective(self, problem: BenchmarkProblem, max_evals: int) -> DDOSuite_ObjectiveWrapper:
         f_budgeted: Callable[[NDArray[np.float64]], float] = make_budgeted_callable(problem, max_evals)
@@ -196,19 +199,26 @@ class DDOSuite_AlgorithmWrapper[T_Algorithm: SafeBOAlgorithm, T_Params: BOParams
         adapted_objective.x_normtensor = NormTensor(X=adapted_objective.bounds, method=StandardizationType.MinMax)
         return adapted_objective
 
-    def _initialize_constraint(self, problem: BenchmarkProblem, max_evals: int) -> AllowUndefined[DDOSuite_ConstraintWrapper]:
+    def _initialize_constraint(self, problem: BenchmarkProblem, max_evals: int) -> AllowUndefined | list[DDOSuite_ConstraintWrapper]:
         if not isinstance(problem, ConstrainedProblem):
             return None
 
+        final: list[DDOSuite_ConstraintWrapper] = []
+
         f_budgeted: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]] = make_constrained_callable(problem=problem, max_evals=max_evals)
-        adapted_constraint: DDOSuite_ConstraintWrapper = DDOSuite_ConstraintWrapper(
-            problem=problem,
-            f_budgeted=f_budgeted,
-            params=self.params,
-            dtype=self.dtype,
-            device=self.device,
-        )
-        return adapted_constraint
+        num_constraints: int = problem._constraints(problem.safe_initial_design(n=1)).shape[0]
+
+        for idx in range(num_constraints):
+            adapted_constraint: DDOSuite_ConstraintWrapper = DDOSuite_ConstraintWrapper(
+                problem=problem,
+                f_budgeted=f_budgeted,
+                params=self.params,
+                constraint_idx=idx,
+                dtype=self.dtype,
+                device=self.device,
+            )
+            final.append(adapted_constraint)
+        return final
 
     def _get_initial_candidates[T_BenchmarkProblem: BenchmarkProblem](self, batch_size: int, seed: int, bounds: Tensor, problem: BenchmarkProblem) -> Tensor:
         if isinstance(problem, ConstrainedProblem):

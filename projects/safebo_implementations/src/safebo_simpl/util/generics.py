@@ -205,7 +205,7 @@ class SafeBOAlgorithm[
         init: str | npt.NDArray[np.float64] = "latinhypercube" if not isinstance(candidates, Tensor) else candidates.detach().cpu().numpy()
 
         _: npt.NDArray[np.float32] = differential_evolution(func=wrapper, bounds=self.sanitize_bounds(bounds.detach().cpu().numpy()), popsize=de_samples_per_loop, maxiter=maxiter, 
-                                                                 strategy=strategy, vectorized=vectorized, updating="deferred", polish=False, mutation=(0.5, 1.0)).x
+                                                                 strategy=strategy, vectorized=vectorized, updating="deferred", polish=False, mutation=(0.5, 1.9), init="sobol", recombination=0.2, tol=1e-3).x
     
         k_elements = min(batch_size, curr_loss.numel())
         _, idx = torch.topk(curr_loss.flatten(), k=k_elements, largest=False)

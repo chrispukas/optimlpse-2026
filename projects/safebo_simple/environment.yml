@@ -1,0 +1,15 @@
+name: safebo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.14.6
+  - pip
+  - pip:
+      - uv
+      - numpy
+      - botorch
+      - gpytorch
+      - torch
+      - tqdm
+prefix: /Users/apple/miniconda3/envs/botorch

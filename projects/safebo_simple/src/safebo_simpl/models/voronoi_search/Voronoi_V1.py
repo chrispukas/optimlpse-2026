@@ -29,7 +29,9 @@ import matplotlib.pyplot as plt
 ran: bool = False
 
 
-type SafetyMetricCallable = Callable[[dict[int, Tensor]], dict[int, float]]
+type BucketMetricCallable = Callable[[dict[int, Tensor]], dict[int, float]]
+type MetricExtractionCallable[T_Constraint: Constraint] = Callable[[Tensor, float, list[T_Constraint]], Tensor]
+type WeightingCallable = Callable[[Tensor], Tensor]
         
 class VoronoiV1(su_safe.SafeBOAlgorithm):
     def __init__(self, X: Tensor, Y: Tensor, 
@@ -44,9 +46,10 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         batch_size: int = self.state.sampling.batch_size
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
-        w: Tensor = self._get_weighting(P=X, weighting_callable=self._get_uncertainty)
+        w: Tensor = self.get_weighting(P=X, weighting_callable=self.pointwise_variance)
         (verticies, generators) = self._get_vor_verticies(P=X, w=w, tol=1e-3)
-        probs: dict[int, float] = self._mc_prob(P=X, w=w, constraints=constraint_objects, conf=conf_level)
+        probs: dict[int, float] = self.mc_estimators(P=X, w=w, constraints=constraint_objects, conf=conf_level, 
+                                                     bucket_metric_method=self.p_safety, metric_extraction_method=self.violation_metric)
 
         verts: Tensor = self._vorwalk(X=X, P=X, verts=verticies, generators=generators, 
                                       w=w, constraints=constraint_objects, conf=conf_level)
@@ -74,47 +77,42 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         reward_mask: Tensor = self.surrogate.get_lcb(X, conf_level).squeeze(-1) #argmin the lcb
         return torch.where(safety_bitmask, reward_mask, penalty) - objective_uncertainty_mask
 
-    def _vorwalk[T_Constraints: Constraint](self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, 
-                                            w: Tensor, constraints: list[T_Constraints], conf: float, n_steps: int = 100) -> Tensor:
-        """
-            Inputs:
-                X: Input points
-                P: Generator points
-                verts: verticies
-                generators: generators corresponding to each given vertex
-                w: vorcand weighting
-                constraints: list of constraint objects
-                conf: confidence-level (specified in parameters)
-                n_steps: maximum number of steps before the optimizer quits
-        """
-        # X.shape: (n, dim),   x.shape: (dim, )
-        x_step: Tensor = X
-        for _ in range(n_steps):
-            nearest_labels: Tensor = self._extract_nearest_vor(x_step, P=P, w=w, indicies=True)
-            verts[generators == nearest_labels]
-
     # ==--=--== Estimators ==--=--==
+    # 1. Monte-Carlo Estimators
 
-    def mc_estimators[T_Constraints: Constraint](self, P: Tensor, w: Tensor, constraints: list[T_Constraints], 
-                                            conf: float, bucketing_method: Optional[SafetyMetricCallable], n: int = 10_000) -> dict[int, float]:
+    def mc_estimators[T_Constraints: Constraint](self, P: Tensor, w: Tensor, constraints: list[T_Constraints], conf: float, 
+                                            bucket_metric_method: Optional[BucketMetricCallable], metric_extraction_method: Optional[MetricExtractionCallable], n: int = 10_000) -> dict[int, float]:
         r"""
-            
+            Monte-carlo based approach for generating candidate points, and then estimating via a method to apply on the outputted buckets.
+
+            Inputs:
+                P: Generator coordinates
+                w: Voronoi distance offsets
+                constraints: List of constraint objects
+                conf: Confidence values for confidence bound calculations
+                bucket_metric_method: Callable to compute on the already pre-generated generator: coordinate buckets (Defaults to `self.p_safety`)
+                metric_extraction_method: Callable to compute bitmasks on specified requirements (Defaults to `self.violation_metric`)
+                n: Initial sample size for the random monte-carlo approach
+            Returns:
+                dict[int, float]: (k: v) -> (unique generator index: computed probability value)
         """
-        if not bucketing_method:
-            bucketing_method = self.p_safety
+        if not bucket_metric_method:
+            bucket_metric_method = self.p_safety
+        if not metric_extraction_method:
+            metric_extraction_method = self.violation_metric
 
         dim: int = P.shape[-1]
 
         # Random point initialization
-        X_samples: Tensor = torch.rand((n * dim, dim), device=P.device, dtype=P.dtype)
+        X_samples: Tensor = self.randn((n * dim, dim), device=P.device, dtype=P.dtype)
 
         # Grab the nearest verticies, bucketing each sample to a given vertex.
         generator_indicies: Tensor = self._extract_nearest_vor(X_samples, P, w)
-        constraint_bitmask: Tensor = self._viol_map(X_samples, conf=conf, constraints=constraints)
+        constraint_bitmask: Tensor = metric_extraction_method(X_samples, conf, constraints)
 
         # Filtering each constraint into their respective buckets
         grouped: dict[int, Tensor] = self.bucket_generator_pairs(generator_indicies, constraint_bitmask)
-        return bucketing_method(grouped)
+        return bucket_metric_method(grouped)
 
     def bucket_generator_pairs(self, X1: Tensor, X2: Tensor) -> dict[int, Tensor]:
         """
@@ -128,19 +126,17 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         unique: Tensor = X1.unique()
         final: dict[int, Tensor] = {}
 
+        # Remapping the ids of each unique generator, to the corresponding X2 (normally the constraint bitmask)
         for u in unique:
             final[int(u.item())] = X2[X1 == u]
         return final
 
     def p_safety(self, bucketed: dict[int, Tensor]) -> dict[int, float]:
         r"""
-
             MC Estimator:
                 :math:`p(x) = \frac{1}{N} \sum_{i=1}^{N} f(x_i)`
-                
             Inputs:
                 bucketed: bucketed tensors by their corresponding unique generator point
-
             Returns:
                 dict: (k: v) -> (generator_idx: `1/N \sum b_i \left( X \right)`)
         """
@@ -149,6 +145,50 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
             final[idx] = bmask.sum().item() / bmask.shape[0]
         return final
 
+    # ==--=--== Other Safety Sampling Strategies ==--=--==
+    # 2. Voronoi Walk Methods
+
+    def _vorwalk[T_Constraints: Constraint](self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, 
+                                                w: Tensor, constraints: list[T_Constraints], conf: float, n_steps: int = 100) -> Tensor:
+            """
+                Inputs:
+                    X: Input points
+                    P: Generator points
+                    verts: verticies
+                    generators: generators corresponding to each given vertex
+                    w: vorcand weighting
+                    constraints: list of constraint objects
+                    conf: confidence-level (specified in parameters)
+                    n_steps: maximum number of steps before the optimizer quits
+
+                Returns:
+                    ... (placeholder)
+            """
+            # Initial step initialization
+            x_step: Tensor = X # X.shape: (n, dim),
+            
+            for _ in range(n_steps):
+                nearest_labels: Tensor = self._extract_nearest_vor(x_step, P=P, w=w, indicies=True)
+                verts[generators == nearest_labels]
+
+            
+
+
+    # ==--=--== Metric Extraction Methods ==--=--==
+
+    def violation_metric[T_Constraint: Constraint](self, X: Tensor, conf: float, constraints: list[T_Constraint]) -> Tensor:
+        bitmask: Tensor = torch.ones((X.shape[0], ), device=X.device, dtype=torch.bool)
+        for c in constraints:
+            if not isinstance(c, SurrogateConstraint):
+                continue
+            bitmask &= (c.get_lcb(X, beta=conf) < 0).squeeze(-1)
+        return bitmask
+
+    # ==--=--== Random Initialization ==--=--==
+
+    def randn(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype) -> Tensor:
+        # I know this is a dumb wrapper of an already existing method at the moment, but I am keeping this here, so I can then easily write hot-swappable methods for Sobol sampling, and uniform grid sampling
+        return torch.rand(shape, device=device, dtype=dtype)
 
 
     # ==--=--== Filters ==--=--==
@@ -159,23 +199,15 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
 
 
 
-    # ==--=--== Helper Methods ==--=--==
+    # ==--=--== Weighting methods ==--=--==
 
-    def _viol_map[T_Constraint: Constraint](self, X: Tensor, conf: float, constraints: list[T_Constraint]) -> Tensor:
-        constraint_bitmask: Tensor = torch.ones((X.shape[0], ), device=X.device, dtype=torch.bool)
-        for c in constraints:
-            if not isinstance(c, SurrogateConstraint):
-                continue
-            constraint_bitmask &= (c.get_lcb(X, beta=conf) < 0).squeeze(-1)
-        return constraint_bitmask
-
-    def _get_weighting(self, P: Tensor, weighting_callable: Callable[[Tensor], Tensor] | None = None) -> Tensor:
+    def get_weighting(self, P: Tensor, weighting_callable: Optional[WeightingCallable] = None) -> Tensor:
         w: Tensor = torch.zeros(P.shape[0], device=P.device)
         if weighting_callable:
             w: Tensor = weighting_callable(P)
         return w.T
 
-    def _get_uncertainty(self, X: Tensor) -> Tensor:
+    def pointwise_variance(self, X: Tensor) -> Tensor:
         return self.surrogate.get_ucb(X, self.state.convergence.confidence_level) - self.surrogate.get_lcb(X, self.state.convergence.confidence_level)
 
     # ==--=--== Voronoi-helper methods ==--=--==

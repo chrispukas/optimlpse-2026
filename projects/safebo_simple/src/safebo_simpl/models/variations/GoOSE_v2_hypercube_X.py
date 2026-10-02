@@ -40,7 +40,7 @@ class GoOSEV2_HypercubeX(su_safe.SafeBOAlgorithm):
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
         beta: float = 1. # Penalty magnitude (scaled by the current properties of the surrogate)
-        alpha_0: float = 1. # Penalty margin (step to minimize marginal candidates)
+        alpha_0: float = 0. # Penalty margin (step to minimize marginal candidates)
         alpha_max: float = 0. #self.surrogate.get_lcb(X, conf_level).max().item()
 
         def x_de_reward_function(
@@ -197,7 +197,7 @@ class GoOSEV2_HypercubeX(su_safe.SafeBOAlgorithm):
             penalty_mask: Tensor = torch.maximum(penalty_mask, violation)
         return penalty_mask * penalty_magnitude
 
-    def hypercube_bounds(self, X: Tensor, padding: float = 1.) -> Tensor:
+    def hypercube_bounds(self, X: Tensor, padding: float = 0.25) -> Tensor:
         min_bounds: Tensor = torch.clamp(torch.amin(X, dim=0) - padding, 0.0, 1.0)
         max_bounds: Tensor = torch.clamp(torch.amax(X, dim=0) + padding, 0.0, 1.0)
 

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Tuple, Any, Callable, Generic
+from typing import Tuple, Any, Callable
 from dataclasses import dataclass
 
 from safebo_simpl.util import params as su_prms
@@ -26,9 +26,7 @@ from botorch import fit as b_fit
 
 import numpy as np
 import numpy.typing as npt
-from scipy.optimize import differential_evolution
-
-from contextlib import contextmanager
+from scipy.optimize import differential_evolution, Bounds
 
 class Surrogate[
     T_BOParams: su_prms.BOParams
@@ -46,7 +44,7 @@ class Surrogate[
             x=X,
             model=self.surrogate_model
         )
-        if self.posterior_state.posterior == None:
+        if self.posterior_state.posterior is None:
             raise ValueError("Poster is not defined!")
         return self.posterior_state.posterior
 
@@ -160,7 +158,7 @@ class SafeBOAlgorithm[
                 X_denormalized_candidates: Tensor = X_normalization_object.denormalize(X_normalized_candidates)
 
             self.X: Tensor = torch.cat((self.X, X_denormalized_candidates), dim=0,)
-            self.Y: Tensor = torch.cat((self.Y, Y_denormalized_candidates), dim=0,)
+            self.Y: Tensor = torch.cat((self.Y, Y_denormalized_candidates.T), dim=0,)
 
             if metrics:
                 print(f"Minimum y-value: {torch.amin(self.X)}, Maximum y-value: {torch.amax(self.X)}, Latest: {Y_denormalized_candidates}")
@@ -178,42 +176,66 @@ class SafeBOAlgorithm[
 
     def de_sampler(
             self,
-            de_samples_per_loop: int,
-            batch_size: int,
             acq_func: Callable[[Tensor], Tensor],
             bounds: Tensor,
+
+            de_samples_per_loop: int = 8,
+            batch_size: int = 32,
             maxiter: int = 10000,
             strategy: str = "rand2bin",
             vectorized: bool = True,
-            candidates: AllowUndefined[torch.Tensor] = None
+            **kwargs,
             ):
 
-        curr_proposed_candidates: torch.Tensor = torch.tensor([], device=self.device, dtype=self.dtype)
-        curr_loss: torch.Tensor = curr_proposed_candidates.clone()
+        kw_args = {
+            "popsize": batch_size,
+            "bounds": self.sanitize_bounds(bounds.detach().cpu().numpy()),
+            "maxiter": maxiter,
+            "strategy": strategy,
+            "vectorized": vectorized,
+            "updating": "deferred",
+            **kwargs
+        }
+
+        return self._default_continuous_wrapper(acq_func, differential_evolution, top_k=de_samples_per_loop, **kw_args)
+
+    def cmaes_sampler(self,
+                      acq_func: Callable[[Tensor], Tensor],
+                      bounds: Tensor,
+
+                      top_k: int = 8,
+                      batch_size: int = 32,
+                      maxiter: int = 10000,
+                      **kwargs,
+                      ) -> Tensor:
+        # Lazy import when required
+        from fcmaes import cmaes
+
+        sanitized = self.sanitize_bounds(bounds.detach().cpu().numpy())
+
+        lb = sanitized[:, 0].flatten().astype(float)  # shape: (dim,)
+        ub = sanitized[:, 1].flatten().astype(float)
         
-        def wrapper(
-                x: npt.NDArray[np.float32]
-                ) -> npt.NDArray[np.float32]:
-            nonlocal curr_proposed_candidates, curr_loss
-            
-            X: Tensor = torch.permute(torch.tensor(x, dtype=self.dtype, device=self.device,), (1, 0))
-            with torch.no_grad():
-                loss: torch.Tensor = acq_func(X)
+        kw_args = {
+                    "bounds": Bounds(lb, ub),
+                    "max_iterations": maxiter,
+                    "popsize": batch_size, 
+                }
 
-            curr_proposed_candidates = X
-            curr_loss = loss
+        return self._default_continuous_wrapper(acq_func, custom_cmaes_minimize, top_k=top_k, **kw_args)
 
-            return loss.detach().cpu().numpy()
+    def _default_continuous_wrapper(self, acq_func: Callable[[Tensor], Tensor], optimizer: Callable[[Any], Any], top_k: int, *args, **kwargs) -> Tensor:
+        vectorized: bool = kwargs.get("vectorized", True)
+        wrapper: ContinuousOptimizerWrapper = ContinuousOptimizerWrapper(acq_func=acq_func, device=self.device, dtype=self.dtype)
 
-        init: str | npt.NDArray[np.float64] = "latinhypercube" if not isinstance(candidates, Tensor) else candidates.detach().cpu().numpy()
-
-        _: npt.NDArray[np.float32] = differential_evolution(func=wrapper, bounds=self.sanitize_bounds(bounds.detach().cpu().numpy()), popsize=de_samples_per_loop, maxiter=maxiter, 
-                                                                 strategy=strategy, vectorized=vectorized, updating="deferred", polish=False, mutation=(0.5, 1.9), init="sobol", recombination=0.2, tol=1e-3).x
-    
-        k_elements = min(batch_size, curr_loss.numel())
-        _, idx = torch.topk(curr_loss.flatten(), k=k_elements, largest=False)
+        _: npt.NDArray[np.float32] = optimizer(wrapper, **kwargs).x
+        curr_loss: Tensor = wrapper.curr_loss
+        curr_proposed_candidates: Tensor = wrapper.curr_proposed_candidates
+        
+        k_elements = min(top_k, curr_loss.numel())
+        _, idx = torch.topk(curr_loss.flatten(), k=k_elements, largest=False) # type: ignore
         return curr_proposed_candidates[idx, :] if vectorized else curr_proposed_candidates[idx]
-
+    
     @staticmethod
     def sanitize_bounds(
         bounds: npt.NDArray[np.float32],
@@ -264,3 +286,70 @@ class PosteriorState():
             if self.posterior is None:
                 return None
             return (self.posterior.mean, torch.sqrt(self.posterior.variance))
+
+
+class ContinuousOptimizerWrapper:
+    def __init__(self, acq_func: Callable[[Tensor], Tensor], device: torch.device, dtype: torch.dtype) -> None:
+        self.device: torch.device = device
+        self.dtype: torch.dtype = dtype
+
+        self.curr_proposed_candidates: torch.Tensor = torch.tensor([], device=device, dtype=dtype)
+        self.curr_loss: torch.Tensor = self.curr_proposed_candidates.clone()
+        self.acq_func: Callable[[Tensor], Tensor] = acq_func
+    def __call__(self, x: npt.NDArray[np.float32]) -> Any:
+        return self.wrapper(x)
+
+    def wrapper(
+            self,
+            x: npt.NDArray[np.float32]
+            ) -> npt.NDArray[np.float32]:        
+        X: Tensor = torch.permute(torch.tensor(x, dtype=self.dtype, device=self.device,), (1, 0))
+        with torch.no_grad():
+            loss: torch.Tensor = self.acq_func(X)
+
+        self.curr_proposed_candidates = X
+        self.curr_loss = loss
+
+        return loss.detach().cpu().numpy()
+
+
+from scipy.optimize import OptimizeResult
+from fcmaes.cmaes import Cmaes
+
+def custom_cmaes_minimize(fun: Callable[[npt.NDArray[np.float32]], npt.NDArray[np.float32]], **kwargs: Any) -> OptimizeResult:
+    bounds = kwargs.get("bounds", None)
+    x0 = kwargs.get("x0", None)
+    popsize = kwargs.get("popsize", 32)
+    max_iterations = kwargs.get("max_iterations", 10000)
+    input_sigma = kwargs.get("input_sigma", 0.3)
+
+    es: Cmaes = Cmaes(
+        bounds=bounds,
+        x0=x0,
+        input_sigma=input_sigma,
+        popsize=popsize,
+        max_evaluations=max_iterations * popsize
+    )
+
+    best_x = None
+    best_fun = float("inf")
+
+    for _ in range(max_iterations):
+        if es.stop:
+            break
+        xs: npt.NDArray[np.float32] = es.ask().T  # shape: (dim, pop_size)
+        loss_vals: npt.NDArray[np.float32] = fun(xs)
+        stop = es.tell(loss_vals)
+
+        min_idx = np.argmin(loss_vals)
+        if loss_vals[min_idx] < best_fun:
+            best_fun = loss_vals[min_idx]
+            best_x = xs[:, min_idx]
+
+        if stop:
+            break
+
+    res = OptimizeResult()
+    res.x = best_x if best_x is not None else np.zeros(1)
+    res.fun = best_fun
+    return res

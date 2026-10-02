@@ -8,3 +8,4 @@ from .GPsTR import (
     )
 from .SafeOpt import SafeOpt
 from .variations import *
+from .voronoi_search import *

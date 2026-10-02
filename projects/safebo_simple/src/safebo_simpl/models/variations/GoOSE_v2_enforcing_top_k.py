@@ -40,7 +40,7 @@ class GoOSEV2_topK(su_safe.SafeBOAlgorithm):
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
         beta: float = 1. # Penalty magnitude (scaled by the current properties of the surrogate)
-        alpha_0: float = 1. # Penalty margin (step to minimize marginal candidates)
+        alpha_0: float = 0. # Penalty margin (step to minimize marginal candidates)
         alpha_max: float = 0. #self.surrogate.get_lcb(X, conf_level).max().item()
 
         def x_de_reward_function(

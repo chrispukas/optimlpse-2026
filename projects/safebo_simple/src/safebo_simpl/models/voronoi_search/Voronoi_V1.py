@@ -26,9 +26,6 @@ from scipy.stats import norm
 
 import matplotlib.pyplot as plt
 
-ran: bool = False
-
-
 type BucketMetricCallable = Callable[[dict[int, Tensor]], dict[int, float]]
 type MetricExtractionCallable[T_Constraint: Constraint] = Callable[[Tensor, float, list[T_Constraint]], Tensor]
 type WeightingCallable = Callable[[Tensor], Tensor]
@@ -47,7 +44,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
         w: Tensor = self.get_weighting(P=X, weighting_callable=self.pointwise_variance)
-        (verticies, generators) = self._get_vor_verticies(P=X, w=w, tol=1e-3)
+        (verticies, generators) = self.get_vertex_generator_pairs(P=X, w=w, tol=1e-3)
         probs: dict[int, float] = self.mc_estimators(P=X, w=w, constraints=constraint_objects, conf=conf_level, 
                                                      bucket_metric_method=self.p_safety, metric_extraction_method=self.violation_metric)
 
@@ -107,7 +104,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         X_samples: Tensor = self.randn((n * dim, dim), device=P.device, dtype=P.dtype)
 
         # Grab the nearest verticies, bucketing each sample to a given vertex.
-        generator_indicies: Tensor = self._extract_nearest_vor(X_samples, P, w)
+        generator_indicies: Tensor = self.extract_nearest_generators(X_samples, P, w)
         constraint_bitmask: Tensor = metric_extraction_method(X_samples, conf, constraints)
 
         # Filtering each constraint into their respective buckets
@@ -149,11 +146,11 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
     # 2. Voronoi Walk Methods
 
     def _vorwalk[T_Constraints: Constraint](self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, 
-                                                w: Tensor, constraints: list[T_Constraints], conf: float, n_steps: int = 100) -> Tensor:
+                                                w: Tensor, constraints: list[T_Constraints], conf: float, n_steps: int = 100, sensitivity: float = 0.05) -> Tensor:
             """
                 Inputs:
-                    X: Input points
-                    P: Generator points
+                    X: Seed points of shape (n, dim)
+                    P: Generator points of shape (m, dim)
                     verts: verticies
                     generators: generators corresponding to each given vertex
                     w: vorcand weighting
@@ -165,14 +162,43 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                     ... (placeholder)
             """
             # Initial step initialization
-            x_step: Tensor = X # X.shape: (n, dim),
-            
+            X_step: Tensor = X # X.shape: (n, dim),
+
             for _ in range(n_steps):
-                nearest_labels: Tensor = self._extract_nearest_vor(x_step, P=P, w=w, indicies=True)
-                verts[generators == nearest_labels]
+                # Grab (generator_index: (vertex, X_step) pairs)
+                generator_indicies: Tensor = self.extract_nearest_generators(X_step, P=P, w=w, indicies=True)
+                grouped_generators: dict[int, Tensor] = self.bucket_generator_pairs(X1=generator_indicies, X2=X_step)
+                grouped_verticies: dict[int, Tensor] = self.bucket_generator_pairs(X1=generators, X2=verts)
+
+                reached: bool = True
+                X_buffer: list[Tensor] = []
+                for (idx, X_g) in grouped_generators.items():
+                    if idx not in grouped_verticies:
+                        raise ValueError(f"Generator index: {idx} not found in allowed verticies!")
+                    
+                    diff: Tensor = grouped_verticies[idx] - X_g
+                    diff_norm: Tensor = self.l2_normalization(diff)
+                    
+                    X_buffer.append(diff_norm)
+                    reached &= bool((diff_norm < sensitivity).all().item())
+
+                # Over-write the original steps
+                X_step = torch.vstack(X_buffer)
+
+                if reached:
+                    break
+            return X_step
 
             
-
+    def l2_normalization(self, X: Tensor) -> Tensor:
+        """
+            Rescales the input tensor X, ensuring that its Euclidian magnitude becomes one
+            Inputs:
+                X: Tensor of shape (n, X)
+            Returns:
+                X: Tensor of shape (n, X) where ||X|| == 1
+        """
+        return X / torch.sqrt(torch.sum(X**2, dim=1).unsqueeze(-1))
 
     # ==--=--== Metric Extraction Methods ==--=--==
 
@@ -212,7 +238,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
 
     # ==--=--== Voronoi-helper methods ==--=--==
 
-    def _extract_nearest_vor(self, X: Tensor, P: Tensor, w: Tensor, indicies: bool = True) -> Tensor:
+    def extract_nearest_generators(self, X: Tensor, P: Tensor, w: Tensor, indicies: bool = True) -> Tensor:
         """
             Inputs:
                 X: Input points
@@ -223,7 +249,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         inds: Tensor = torch.argmin(torch.cdist(X, P) - w, dim=1) # Returns indicies
         return inds if indicies else P[inds]
     
-    def _get_vor_verticies(self, P: Tensor, w: Tensor, n: int = 1_000_000, tol: float = 1e-3) -> tuple[Tensor, Tensor]:  
+    def get_vertex_generator_pairs(self, P: Tensor, w: Tensor, n: int = 1_000_000, tol: float = 1e-3) -> tuple[Tensor, Tensor]:  
         """
             Inputs:
                 n: number of MC samples to estimate location of verticies
@@ -292,8 +318,8 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         grid = torch.full((res * res, P.shape[1]), 0.5, device=P.device, dtype=P.dtype)
         grid[:, :2] = torch.cartesian_prod(xs, xs)
 
-        labels = self._extract_nearest_vor(grid, P=P, w=w).reshape(res, res)
-        vertices, _ = self._get_vor_verticies(P=P, w=w)
+        labels = self.extract_nearest_generators(grid, P=P, w=w).reshape(res, res)
+        vertices, _ = self.get_vertex_generator_pairs(P=P, w=w)
 
         fig, ax = plt.subplots(figsize=(7, 7), dpi=120)
 
@@ -426,7 +452,8 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
 
         return torch.permute(torch.vstack((min_bounds, max_bounds)), (1, 0))
 
-    def enforce_safety[T_Constraint: Constraint](self, X: Tensor, X_safe: Tensor, conf_level: float, constraint_objects: list[T_Constraint], penalty_magnitude: float) -> Tensor:
+    def enforce_safety[T_Constraint: Constraint](self, X: Tensor, X_safe: Tensor, conf_level: float, 
+                                                 constraint_objects: list[T_Constraint], penalty_magnitude: float) -> Tensor:
         (_, bitmask) = self.constraint_safe_mask(
                     X, 
                     conf_level=conf_level, 

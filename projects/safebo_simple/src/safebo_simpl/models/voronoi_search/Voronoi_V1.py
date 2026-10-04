@@ -8,7 +8,7 @@ from safebo_simpl.objective_functions import ObjectiveFunction
 from safebo_simpl.util.params import BOParams
 from safebo_simpl.util.continuity import NormTensor
 from safebo_simpl.constraints import SurrogateConstraint, NonSurrogateConstraint, Constraint
-from safebo_simpl.util.s_math import LipschitzConstraints
+from safebo_simpl.util.s_math import LipschitzConstraints, LipschitzConstraintPair
 
 import torch
 from torch import Tensor
@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 type BucketMetricCallable = Callable[[dict[int, Tensor]], dict[int, float]]
 type MetricExtractionCallable[T_Constraint: Constraint] = Callable[[Tensor, float, list[T_Constraint]], Tensor]
 type WeightingCallable = Callable[[Tensor], Tensor]
+type UpdateCallable[T_Constraint: Constraint] = Callable[[Tensor, Tensor, LipschitzConstraints], None]
         
 class VoronoiV1(su_safe.SafeBOAlgorithm):
     def __init__(self, X: Tensor, Y: Tensor, 
@@ -48,8 +49,9 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         probs: dict[int, float] = self.mc_estimators(P=X, w=w, constraints=constraint_objects, conf=conf_level, 
                                                      bucket_metric_method=self.p_safety, metric_extraction_method=self.violation_metric)
 
-        verts: Tensor = self._vorwalk(X=X, P=X, verts=verticies, generators=generators, 
-                                      w=w, constraints=constraint_objects, conf=conf_level)
+        lipschitz_constraint: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level, surrogate_constraints=constraint_objects)
+        verts: Tensor = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, 
+                                      w=w, lipschitz=lipschitz_constraint, conf=conf_level)
 
         self.plot_voronoi(X, w)
         self.plot_fitted_normal(probs)
@@ -145,49 +147,55 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
     # ==--=--== Other Safety Sampling Strategies ==--=--==
     # 2. Voronoi Walk Methods
 
-    def _vorwalk[T_Constraints: Constraint](self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, 
-                                                w: Tensor, constraints: list[T_Constraints], conf: float, n_steps: int = 100, sensitivity: float = 0.05) -> Tensor:
-            """
-                Inputs:
-                    X: Seed points of shape (n, dim)
-                    P: Generator points of shape (m, dim)
-                    verts: verticies
-                    generators: generators corresponding to each given vertex
-                    w: vorcand weighting
-                    constraints: list of constraint objects
-                    conf: confidence-level (specified in parameters)
-                    n_steps: maximum number of steps before the optimizer quits
+    def gradient_free_voronoi_walk(
+            self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, w: Tensor, lipschitz: LipschitzConstraints, 
+            update_callable: Optional[UpdateCallable] = None, conf: float = 2.0, n_steps: int = 100, sensitivity: float = 0.05) -> Tensor:
+        """
+            Inputs:
+                X: Seed points of shape (n, dim)
+                P: Generator points of shape (m, dim)
+                verts: verticies
+                generators: generators corresponding to each given vertex
+                w: vorcand weighting
+                lipschitz: lipschitz constraint object
+                conf: confidence-level (specified in parameters)
+                n_steps: maximum number of steps before the optimizer quits
 
-                Returns:
-                    ... (placeholder)
-            """
-            # Initial step initialization
-            X_step: Tensor = X # X.shape: (n, dim),
+            Returns:
+                Tensor: (n, dim) of final steps (placeholder)
+        """
+        if not update_callable:
+            update_callable = self.lipschitz_checks
 
-            for _ in range(n_steps):
-                # Grab (generator_index: (vertex, X_step) pairs)
-                generator_indicies: Tensor = self.extract_nearest_generators(X_step, P=P, w=w, indicies=True)
-                grouped_generators: dict[int, Tensor] = self.bucket_generator_pairs(X1=generator_indicies, X2=X_step)
-                grouped_verticies: dict[int, Tensor] = self.bucket_generator_pairs(X1=generators, X2=verts)
+        # Initial step initialization
+        X_step: Tensor = X # X.shape: (n, dim),
 
-                reached: bool = True
-                X_buffer: list[Tensor] = []
-                for (idx, X_g) in grouped_generators.items():
-                    if idx not in grouped_verticies:
-                        raise ValueError(f"Generator index: {idx} not found in allowed verticies!")
-                    
-                    diff: Tensor = grouped_verticies[idx] - X_g
-                    diff_norm: Tensor = self.l2_normalization(diff)
-                    
-                    X_buffer.append(diff_norm)
-                    reached &= bool((diff_norm < sensitivity).all().item())
+        for _ in range(n_steps):
+            # Grab (generator_index: (vertex, X_step) pairs)
+            generator_indicies: Tensor = self.extract_nearest_generators(X_step, P=P, w=w, indicies=True)
+            grouped_generators: dict[int, Tensor] = self.bucket_generator_pairs(X1=generator_indicies, X2=X_step)
+            grouped_verticies: dict[int, Tensor] = self.bucket_generator_pairs(X1=generators, X2=verts)
 
-                # Over-write the original steps
-                X_step = torch.vstack(X_buffer)
+            reached: bool = True
+            X_buffer: list[Tensor] = []
+            for (idx, X_g) in grouped_generators.items():
+                if idx not in grouped_verticies:
+                    raise ValueError(f"Generator index: {idx} not found in allowed verticies!")
+                
+                diff: Tensor = grouped_verticies[idx] - X_g
+                diff_norm: Tensor = self.l2_normalization(diff)
+                
+                X_buffer.append(diff_norm)
+                reached &= bool((diff_norm < sensitivity).all().item())
 
-                if reached:
-                    break
-            return X_step
+            # Over-write the original steps, and paint the voronoi landscape with a safety callable (for safety checks)
+            X_step = torch.vstack(X_buffer)
+            update_callable(X_step, P, lipschitz) 
+
+            # Early escape sequence
+            if reached:
+                break
+        return X_step
 
             
     def l2_normalization(self, X: Tensor) -> Tensor:
@@ -199,10 +207,22 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                 X: Tensor of shape (n, X) where ||X|| == 1
         """
         return X / torch.sqrt(torch.sum(X**2, dim=1).unsqueeze(-1))
+    
+    # ==--=--== Safety guaranteeing methods ==--=--==
 
-    # ==--=--== Metric Extraction Methods ==--=--==
+    def lipschitz_checks(self, X: Tensor, P: Tensor, lipschitz: LipschitzConstraints) -> None:
+        violation: Tensor = lipschitz.get_violation_mask(X, P)
+
+
+
+
+
+    # ==--=--== Metric extraction methods ==--=--==
 
     def violation_metric[T_Constraint: Constraint](self, X: Tensor, conf: float, constraints: list[T_Constraint]) -> Tensor:
+        """
+
+        """
         bitmask: Tensor = torch.ones((X.shape[0], ), device=X.device, dtype=torch.bool)
         for c in constraints:
             if not isinstance(c, SurrogateConstraint):
@@ -210,7 +230,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
             bitmask &= (c.get_lcb(X, beta=conf) < 0).squeeze(-1)
         return bitmask
 
-    # ==--=--== Random Initialization ==--=--==
+    # ==--=--== Random initialization methods ==--=--==
 
     def randn(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype) -> Tensor:
         # I know this is a dumb wrapper of an already existing method at the moment, but I am keeping this here, so I can then easily write hot-swappable methods for Sobol sampling, and uniform grid sampling

@@ -30,8 +30,7 @@ class LipschitzConstraints[T_Constraint: Constraint]():
         pairs: list[LipschitzConstraintPair] = self(X1)
 
         for (L_i, u_i) in pairs:
-            l: Tensor = u_i.reshape(-1, 1) - L_i * d
-            violation |= (l < 0)
+            violation |= (u_i.reshape(-1, 1) - L_i * d) < 0
 
         return violation.any(dim=1)
 

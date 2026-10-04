@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 type BucketMetricCallable = Callable[[dict[int, Tensor]], dict[int, float]]
 type MetricExtractionCallable[T_Constraint: Constraint] = Callable[[Tensor, float, list[T_Constraint]], Tensor]
 type WeightingCallable = Callable[[Tensor], Tensor]
-type UpdateCallable[T_Constraint: Constraint] = Callable[[Tensor, Tensor, LipschitzConstraints], None]
+type UpdateCallable[T_Constraint: Constraint] = Callable[[Tensor, Tensor, Tensor, LipschitzConstraints], dict[int, Tensor]]
         
 class VoronoiV1(su_safe.SafeBOAlgorithm):
     def __init__(self, X: Tensor, Y: Tensor, 
@@ -47,10 +47,10 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         w: Tensor = self.get_weighting(P=X, weighting_callable=self.pointwise_variance)
         (verticies, generators) = self.get_vertex_generator_pairs(P=X, w=w, tol=1e-3)
         probs: dict[int, float] = self.mc_estimators(P=X, w=w, constraints=constraint_objects, conf=conf_level, 
-                                                     bucket_metric_method=self.p_safety, metric_extraction_method=self.violation_metric)
+                                                     bucket_metric_method=self.p_bitmask, metric_extraction_method=self.violation_metric)
 
         lipschitz_constraint: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level, surrogate_constraints=constraint_objects)
-        verts: Tensor = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, 
+        (_, painted_probs) = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, 
                                       w=w, lipschitz=lipschitz_constraint, conf=conf_level)
 
         self.plot_voronoi(X, w)
@@ -96,7 +96,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                 dict[int, float]: (k: v) -> (unique generator index: computed probability value)
         """
         if not bucket_metric_method:
-            bucket_metric_method = self.p_safety
+            bucket_metric_method = self.p_bitmask
         if not metric_extraction_method:
             metric_extraction_method = self.violation_metric
 
@@ -130,9 +130,9 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
             final[int(u.item())] = X2[X1 == u]
         return final
 
-    def p_safety(self, bucketed: dict[int, Tensor]) -> dict[int, float]:
+    def p_bitmask(self, bucketed: dict[int, Tensor]) -> dict[int, float]:
         r"""
-            MC Estimator:
+            MC estimator using simple bitmask counting:
                 :math:`p(x) = \frac{1}{N} \sum_{i=1}^{N} f(x_i)`
             Inputs:
                 bucketed: bucketed tensors by their corresponding unique generator point
@@ -147,9 +147,11 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
     # ==--=--== Other Safety Sampling Strategies ==--=--==
     # 2. Voronoi Walk Methods
 
+    type GradfreeVorwalkResultType = tuple[Tensor, dict[int, Tensor]]
+
     def gradient_free_voronoi_walk(
             self, X: Tensor, P: Tensor, verts: Tensor, generators: Tensor, w: Tensor, lipschitz: LipschitzConstraints, 
-            update_callable: Optional[UpdateCallable] = None, conf: float = 2.0, n_steps: int = 100, sensitivity: float = 0.05) -> Tensor:
+            update_callable: Optional[UpdateCallable] = None, conf: float = 2.0, n_steps: int = 100, sensitivity: float = 0.05) -> GradfreeVorwalkResultType:
         """
             Inputs:
                 X: Seed points of shape (n, dim)
@@ -168,7 +170,8 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
             update_callable = self.lipschitz_checks
 
         # Initial step initialization
-        X_step: Tensor = X # X.shape: (n, dim),
+        X_step: Tensor = X # X.shape: (n, dim) != P.shape: (m, dim)
+        pairs_final: dict[int, Tensor] = {}
 
         for _ in range(n_steps):
             # Grab (generator_index: (vertex, X_step) pairs)
@@ -190,12 +193,32 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
 
             # Over-write the original steps, and paint the voronoi landscape with a safety callable (for safety checks)
             X_step = torch.vstack(X_buffer)
-            update_callable(X_step, P, lipschitz) 
-
+            bitmask_pairs: dict[int, Tensor] = update_callable(X_step, P, w, lipschitz) # (k: v) -> (generator_index: ith_viol_bitmask)
+            pairs_final = self.merge_rolling_pairs(pairs_final, bitmask_pairs)
+            
             # Early escape sequence
             if reached:
                 break
-        return X_step
+
+        return (X_step, pairs_final)
+
+    def merge_rolling_pairs(self, p1: dict[int, Tensor], p2: dict[int, Tensor]) -> dict[int, Tensor]:
+        """
+            In-place operation.
+
+            Inputs:
+                p1: list pair 1 with (k: v) -> (generator_idx: Tensor of corresponding values)
+                p1: list pair 2 with (k: v) -> (generator_idx: Tensor of corresponding values)
+            Returns:
+                dict[int, Tensor]: (k: v) -> (generator_idx: Tensor of corresponding values) new merged dictionary
+        """
+        common: set[int] = set(p1.keys()) & set(p2.keys())
+        for k in common:
+            if k not in p2 or k not in p1:
+                continue
+            p1[k] = torch.vstack((p1[k], p2[k]))
+        return p1
+            
 
             
     def l2_normalization(self, X: Tensor) -> Tensor:
@@ -210,13 +233,11 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
     
     # ==--=--== Safety guaranteeing methods ==--=--==
 
-    def lipschitz_checks(self, X: Tensor, P: Tensor, lipschitz: LipschitzConstraints) -> None:
-        violation: Tensor = lipschitz.get_violation_mask(X, P)
-
-
-
-
-
+    def lipschitz_checks(self, X: Tensor, P: Tensor, w: Tensor, lipschitz: LipschitzConstraints) -> dict[int, Tensor]:
+        violation: Tensor = lipschitz.get_violation_mask(X, P) # Shape: (n, dim), where n = n(X)
+        nearest_generators: Tensor = self.extract_nearest_generators(X=X, P=P, w=w)
+        return self.bucket_generator_pairs(X1=nearest_generators, X2=violation)
+        
     # ==--=--== Metric extraction methods ==--=--==
 
     def violation_metric[T_Constraint: Constraint](self, X: Tensor, conf: float, constraints: list[T_Constraint]) -> Tensor:

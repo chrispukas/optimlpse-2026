@@ -228,7 +228,6 @@ class GoOSEV2(su_safe.SafeBOAlgorithm):
             final: Tensor = torch.hstack((final, lcb))
         return final
 
-
     def safety_fallback(self, X_prop: Tensor, X_safe: Tensor, beta: float) -> Tensor:
         (X_safe_lcb, X_safe_idx) = torch.min(self.surrogate.get_lcb(X_safe, beta=beta))
         (X_proposed_lcb, X_prop_idx) = torch.min(self.surrogate.get_lcb(X_prop, beta=beta))

@@ -50,20 +50,31 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                                                      bucket_metric_method=self.p_bitmask, metric_extraction_method=self.violation_metric)
 
         lipschitz_constraint: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level, surrogate_constraints=constraint_objects)
-        (_, painted_probs) = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, 
-                                      w=w, lipschitz=lipschitz_constraint, conf=conf_level)
+        (_, painted_probs) = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, w=w, lipschitz=lipschitz_constraint, conf=conf_level)
 
         self.plot_voronoi(X, w)
         self.plot_fitted_normal(probs)
 
+        rolling_bitmask_safety: dict[int, Tensor] = {}
+
         def X_reward_func(X_input: Tensor) -> Tensor:
-            topology: Tensor = self.get_X_topology(X_input, conf_level=conf_level, constraint_objects=constraint_objects)
-            return topology
+            nonlocal rolling_bitmask_safety
+            (_, bitmask_pairs) = self.gradient_free_voronoi_walk(X=X_input, P=X, w=w,
+                                    verts=verticies, generators=generators, lipschitz=lipschitz_constraint)
+            rolling_bitmask_safety: dict[int, Tensor] = self.merge_rolling_pairs(rolling_bitmask_safety, bitmask_pairs)
+            
+            return self.X_topology_simplified(X_input, conf_level=conf_level, constraint_objects=constraint_objects)
 
         optimized: Tensor = self.de_sampler(X_reward_func, bounds=self.unit_bounds)
+        probs: dict[int, float] = self.p_bitmask(rolling_bitmask_safety)
+        (k_highest, k_lowest) = self.prob_ranking(prob=probs)
+
+
         return optimized
 
-    def get_X_topology[T_Constraint: Constraint](self, X: Tensor, conf_level: float, constraint_objects: list[T_Constraint]) -> Tensor:
+    # ==--=--== Topology Acquisition Methods ==--=--==
+
+    def X_topology_simplified[T_Constraint: Constraint](self, X: Tensor, conf_level: float, constraint_objects: list[T_Constraint]) -> Tensor:
         # smooth penalty mask to guarantee that this candidate is exploring in an uncertain point of the objective surrogate
         objective_uncertainty_mask: Tensor = self.objective_uncertainty_mask(X, conf_level=conf_level)
         
@@ -80,7 +91,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
     # 1. Monte-Carlo Estimators
 
     def mc_estimators[T_Constraints: Constraint](self, P: Tensor, w: Tensor, constraints: list[T_Constraints], conf: float, 
-                                            bucket_metric_method: Optional[BucketMetricCallable], metric_extraction_method: Optional[MetricExtractionCallable], n: int = 10_000) -> dict[int, float]:
+                                            bucket_metric_method: Optional[BucketMetricCallable], metric_extraction_method: Optional[MetricExtractionCallable], X: Optional[Tensor] = None, n: int = 10_000) -> dict[int, float]:
         r"""
             Monte-carlo based approach for generating candidate points, and then estimating via a method to apply on the outputted buckets.
 
@@ -91,6 +102,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                 conf: Confidence values for confidence bound calculations
                 bucket_metric_method: Callable to compute on the already pre-generated generator: coordinate buckets (Defaults to `self.p_safety`)
                 metric_extraction_method: Callable to compute bitmasks on specified requirements (Defaults to `self.violation_metric`)
+                X: Input candidates, if not specified, then random initialization of size n is completed
                 n: Initial sample size for the random monte-carlo approach
             Returns:
                 dict[int, float]: (k: v) -> (unique generator index: computed probability value)
@@ -103,7 +115,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         dim: int = P.shape[-1]
 
         # Random point initialization
-        X_samples: Tensor = self.randn((n * dim, dim), device=P.device, dtype=P.dtype)
+        X_samples: Tensor = self.randn((n * dim, dim), device=P.device, dtype=P.dtype) if not X else X
 
         # Grab the nearest verticies, bucketing each sample to a given vertex.
         generator_indicies: Tensor = self.extract_nearest_generators(X_samples, P, w)
@@ -164,7 +176,7 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                 n_steps: maximum number of steps before the optimizer quits
 
             Returns:
-                Tensor: (n, dim) of final steps (placeholder)
+                tuple[Tensor, final bitmasking pairs (int, Tensor)]: (n, dim) of final steps (placeholder)
         """
         if not update_callable:
             update_callable = self.lipschitz_checks
@@ -219,8 +231,6 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
             p1[k] = torch.vstack((p1[k], p2[k]))
         return p1
             
-
-            
     def l2_normalization(self, X: Tensor) -> Tensor:
         """
             Rescales the input tensor X, ensuring that its Euclidian magnitude becomes one
@@ -257,14 +267,26 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         # I know this is a dumb wrapper of an already existing method at the moment, but I am keeping this here, so I can then easily write hot-swappable methods for Sobol sampling, and uniform grid sampling
         return torch.rand(shape, device=device, dtype=dtype)
 
-
     # ==--=--== Filters ==--=--==
 
 
 
     # ==--=--== Ranking methods ==--=--==
 
-
+    def prob_ranking(self, prob: dict[int, float], k_highest: int = 1, k_lowest: int = 1) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+        """
+            Top k, and lowest k ranking (can also implement min heap for O(n) t.c. vs O(nlogn))
+            Inputs:
+                prob: probability dictionary with (k: v) -> (generator_index: probability)
+                k_highest: the number of highest elements to return
+                k_highest: the number of lowest elements to return
+            Returns:
+                tuple[list[tuple[int, float]], list[tuple[int, float]]]: Returns two lists with paired (generator_index, probability) 1. top k highest, and 2. top k lowest elements
+        """
+        l: int = len(prob)
+        paired: list[tuple[int, float]] = list(zip(prob.keys(), prob.values()))
+        srt: list[tuple[int, float]] = sorted(paired, key=lambda x: x[1])
+        return (srt[:min(k_highest, l)], srt[min(k_lowest, l):])
 
     # ==--=--== Weighting methods ==--=--==
 

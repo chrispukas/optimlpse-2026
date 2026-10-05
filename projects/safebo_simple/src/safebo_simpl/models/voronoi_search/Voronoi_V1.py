@@ -44,33 +44,38 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         batch_size: int = self.state.sampling.batch_size
         constraint_objects: list[T_Constraint] = self.state.constraints.constraints or []
 
+        lipschitz_constraint: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level, surrogate_constraints=constraint_objects)
         w: Tensor = self.get_weighting(P=X, weighting_callable=self.pointwise_variance)
         (verticies, generators) = self.get_vertex_generator_pairs(P=X, w=w, tol=1e-3)
-        probs: dict[int, float] = self.mc_estimators(P=X, w=w, constraints=constraint_objects, conf=conf_level, 
-                                                     bucket_metric_method=self.p_bitmask, metric_extraction_method=self.violation_metric)
-
-        lipschitz_constraint: LipschitzConstraints = LipschitzConstraints(conf_level=conf_level, surrogate_constraints=constraint_objects)
-        (_, painted_probs) = self.gradient_free_voronoi_walk(X=X, P=X, verts=verticies, generators=generators, w=w, lipschitz=lipschitz_constraint, conf=conf_level)
 
         self.plot_voronoi(X, w)
-        self.plot_fitted_normal(probs)
 
-        rolling_bitmask_safety: dict[int, Tensor] = {}
+        rolling_bitmask_lipschitz_safety: dict[int, Tensor] = {}
+        rolling_bitmask_constraint_violations: dict[int, Tensor] = {}
 
         def X_reward_func(X_input: Tensor) -> Tensor:
-            nonlocal rolling_bitmask_safety
+            nonlocal rolling_bitmask_lipschitz_safety, rolling_bitmask_constraint_violations
             (_, bitmask_pairs) = self.gradient_free_voronoi_walk(X=X_input, P=X, w=w,
                                     verts=verticies, generators=generators, lipschitz=lipschitz_constraint)
-            rolling_bitmask_safety: dict[int, Tensor] = self.merge_rolling_pairs(rolling_bitmask_safety, bitmask_pairs)
+            rolling_bitmask_lipschitz_safety: dict[int, Tensor] = self.merge_rolling_pairs(rolling_bitmask_lipschitz_safety, bitmask_pairs)
+
+            constraint_bitmask: dict[int, Tensor] = self.bucketed_violation_metrics(X=X_input, P=X, w=w, conf=conf_level, constraints=constraint_objects)
+            rolling_bitmask_constraint_violations: dict[int, Tensor] = self.merge_rolling_pairs(rolling_bitmask_constraint_violations, constraint_bitmask)
             
             return self.X_topology_simplified(X_input, conf_level=conf_level, constraint_objects=constraint_objects)
 
-        optimized: Tensor = self.de_sampler(X_reward_func, bounds=self.unit_bounds)
-        probs: dict[int, float] = self.p_bitmask(rolling_bitmask_safety)
-        (k_highest, k_lowest) = self.prob_ranking(prob=probs)
+        optimized: Tensor = self.de_sampler(X_reward_func, bounds=self.unit_bounds, batch_size=batch_size)
+        grouped: dict[int, Tensor] = self.bucket_generator_pairs(self.extract_nearest_generators(X=optimized, P=X, w=w), optimized)
 
+        lipschitz_probs: dict[int, float] = self.p_bitmask(rolling_bitmask_lipschitz_safety)
+        constraint_violation_probs: dict[int, float] = self.p_bitmask(rolling_bitmask_constraint_violations)
 
-        return optimized
+        conditioned: dict[int, float] = self.condition_rolling_pairs((lipschitz_probs, constraint_violation_probs))
+        (k_highest, k_lowest) = self.prob_ranking(prob=conditioned)
+
+        # Ranking mechanism to chose safe sets, and expander sets, proposing a new candidate position based on probability metrics
+        sel: Tensor = self.dist_select(candidate_pairs=grouped, k_safe=k_highest, k_unsafe=k_lowest)
+        return sel
 
     # ==--=--== Topology Acquisition Methods ==--=--==
 
@@ -230,6 +235,23 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
                 continue
             p1[k] = torch.vstack((p1[k], p2[k]))
         return p1
+
+    def condition_rolling_pairs(self, probs: tuple[dict[int, float], ...]) -> dict[int, float]:
+        """
+            Conditioning on each pair in the list of prob pairs.
+            Inputs:
+                probs: list of generator_idx: probability key-value pairs
+            Outputs:
+                dict[int, float]: a new multiplicative conditioned prob per provided idx
+        """
+        final: dict[int, float] = {}
+        for p in probs:
+            for (k, v) in p.items():
+                if k in final:
+                    final[k] *= v
+                else:
+                    final[k] = v
+        return final
             
     def l2_normalization(self, X: Tensor) -> Tensor:
         """
@@ -249,6 +271,11 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         return self.bucket_generator_pairs(X1=nearest_generators, X2=violation)
         
     # ==--=--== Metric extraction methods ==--=--==
+
+    def bucketed_violation_metrics[T_Constraint: Constraint](self, X: Tensor, P: Tensor, w: Tensor, conf: float, constraints: list[T_Constraint]) -> dict[int, Tensor]:
+        violation: Tensor = self.violation_metric(X, conf=conf, constraints=constraints) # Shape: (n, dim), where n = n(X)
+        nearest_generators: Tensor = self.extract_nearest_generators(X=X, P=P, w=w)
+        return self.bucket_generator_pairs(X1=nearest_generators, X2=violation)
 
     def violation_metric[T_Constraint: Constraint](self, X: Tensor, conf: float, constraints: list[T_Constraint]) -> Tensor:
         """
@@ -286,7 +313,22 @@ class VoronoiV1(su_safe.SafeBOAlgorithm):
         l: int = len(prob)
         paired: list[tuple[int, float]] = list(zip(prob.keys(), prob.values()))
         srt: list[tuple[int, float]] = sorted(paired, key=lambda x: x[1])
-        return (srt[:min(k_highest, l)], srt[min(k_lowest, l):])
+        return (srt[-min(k_highest, l):][::-1], srt[:min(k_lowest, l)])
+
+    # ==--=--== Candidate selection methods ==--=--==
+
+    def dist_select(self, candidate_pairs: dict[int, Tensor], k_safe: list[tuple[int, float]], k_unsafe: list[tuple[int, float]]) -> Tensor:
+        k_safe_proposed: Tensor = self._merge_prob_pairs(candidate_pairs=candidate_pairs, prob_pairs=k_safe)
+        k_unsafe_proposed: Tensor = self._merge_prob_pairs(candidate_pairs=candidate_pairs, prob_pairs=k_unsafe)
+
+        dist: Tensor = torch.cdist(k_safe_proposed, k_unsafe_proposed).squeeze()
+        return k_safe_proposed[torch.argmin(dist, dim=0)]
+
+    def _merge_prob_pairs(self, candidate_pairs: dict[int, Tensor], prob_pairs: list[tuple[int, float]]) -> Tensor:
+        k_safe_proposed_buffer: list[Tensor] = []
+        for (idx, _) in prob_pairs:
+            k_safe_proposed_buffer.append(candidate_pairs[idx])
+        return torch.vstack(k_safe_proposed_buffer)
 
     # ==--=--== Weighting methods ==--=--==
 
